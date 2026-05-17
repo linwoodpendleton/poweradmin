@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -31,43 +31,42 @@ class CryptoKey
     private ?string $algorithm;
     private bool $isActive;
     private ?string $dnskey;
-    private ?array $ds;
+    private array $ds;
 
     public function __construct(
-        ?int    $id,
+        ?int $id,
         ?string $type = null,
-        ?int    $size = null,
+        ?int $size = null,
         ?string $algorithm = null,
-        bool    $isActive = false,
+        bool $isActive = false,
         ?string $dnskey = null,
-        ?array  $ds = null
-    )
-    {
+        ?array $ds = null
+    ) {
         $this->id = $id;
         $this->type = $type;
         $this->size = $size;
         $this->algorithm = $algorithm;
         $this->isActive = $isActive;
         $this->dnskey = $dnskey;
-        $this->ds = $ds;
+        $this->ds = $ds ?? [];
     }
 
-    public function getId(): int
+    public function getId(): ?int
     {
         return $this->id;
     }
 
-    public function getType(): string
+    public function getType(): ?string
     {
         return $this->type;
     }
 
-    public function getSize(): int
+    public function getSize(): ?int
     {
         return $this->size;
     }
 
-    public function getAlgorithm(): string
+    public function getAlgorithm(): ?string
     {
         return $this->algorithm;
     }
@@ -87,7 +86,7 @@ class CryptoKey
         $this->isActive = false;
     }
 
-    public function getDnskey(): string
+    public function getDnskey(): ?string
     {
         return $this->dnskey;
     }

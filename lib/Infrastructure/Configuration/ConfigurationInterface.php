@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -24,5 +24,28 @@ namespace Poweradmin\Infrastructure\Configuration;
 
 interface ConfigurationInterface
 {
-    public function get($name): mixed;
+    /**
+     * Get a configuration value
+     *
+     * @param string $group Configuration group
+     * @param string $key Configuration key
+     * @param mixed $default Default value if not found
+     * @return mixed Configuration value or default if not found
+     */
+    public function get(string $group, string $key, mixed $default = null): mixed;
+
+    /**
+     * Get an entire configuration group
+     *
+     * @param string $group Configuration group
+     * @return array Configuration group values
+     */
+    public function getGroup(string $group): array;
+
+    /**
+     * Get all configuration settings
+     *
+     * @return array All settings
+     */
+    public function getAll(): array;
 }

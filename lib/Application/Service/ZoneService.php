@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2026 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -46,5 +46,85 @@ class ZoneService
             }
         }
         return false;
+    }
+
+    /**
+     * Get reverse zones with efficient database filtering and pagination
+     *
+     * @param string $permType Permission type ('all', 'own')
+     * @param int $userId User ID
+     * @param string $reverseType Type of reverse zones to fetch ('all', 'ipv4', 'ipv6')
+     * @param int $offset Pagination offset
+     * @param int $limit Maximum number of records to return
+     * @param string $sortBy Column to sort by
+     * @param string $sortDirection Sort direction ('ASC' or 'DESC')
+     * @return array Array of reverse zones
+     */
+    public function getReverseZones(
+        string $permType,
+        int $userId,
+        string $reverseType = 'all',
+        int $offset = 0,
+        int $limit = 25,
+        string $sortBy = 'name',
+        string $sortDirection = 'ASC',
+        bool $showSerial = false,
+        bool $showTemplate = false
+    ): array {
+        return $this->zoneRepository->getReverseZones(
+            $permType,
+            $userId,
+            $reverseType,
+            $offset,
+            $limit,
+            $sortBy,
+            $sortDirection,
+            false,
+            $showSerial,
+            $showTemplate
+        );
+    }
+
+    /**
+     * Count reverse zones matching specific criteria
+     *
+     * @param string $permType Permission type ('all', 'own')
+     * @param int $userId User ID
+     * @param string $reverseType Type of reverse zones to count ('all', 'ipv4', 'ipv6')
+     * @param string $sortBy Column to sort by
+     * @param string $sortDirection Sort direction ('ASC' or 'DESC')
+     * @return int Count of matching zones
+     */
+    public function countReverseZones(
+        string $permType,
+        int $userId,
+        string $reverseType = 'all',
+        string $sortBy = 'name',
+        string $sortDirection = 'ASC'
+    ): int {
+        return $this->zoneRepository->getReverseZones(
+            $permType,
+            $userId,
+            $reverseType,
+            0,
+            0,
+            $sortBy,
+            $sortDirection,
+            true,
+            false,
+            false
+        );
+    }
+
+    /**
+     * Get all reverse zone counts in a single query (optimization)
+     *
+     * @param string $permType Permission type
+     * @param int $userId User ID
+     * @return array{count_all: int, count_ipv4: int, count_ipv6: int}
+     */
+    public function getReverseZoneCounts(string $permType, int $userId): array
+    {
+        return $this->zoneRepository->getReverseZoneCounts($permType, $userId);
     }
 }

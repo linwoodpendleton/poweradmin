@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -26,7 +26,7 @@
  *
  * @package     Poweradmin
  * @copyright   2007-2010 Rejo Zenger <rejo@zenger.nl>
- * @copyright   2010-2024 Poweradmin Development Team
+ * @copyright   2010-2025 Poweradmin Development Team
  * @license     https://opensource.org/licenses/GPL-3.0 GPL
  */
 
@@ -36,58 +36,63 @@ use Poweradmin\Application\Service\DnssecProviderFactory;
 use Poweradmin\BaseController;
 use Poweradmin\Domain\Model\Permission;
 use Poweradmin\Domain\Model\UserManager;
+use Poweradmin\Domain\Service\DnsIdnService;
 use Poweradmin\Domain\Service\DnsRecord;
 use Poweradmin\Domain\Service\Validator;
+use Poweradmin\Domain\Utility\DnsHelper;
 
 class DnssecDsDnskeyController extends BaseController
 {
 
     public function run(): void
     {
-        $pdnssec_use = $this->config('pdnssec_use');
+        $pdnssec_use = $this->config->get('dnssec', 'enabled', false);
 
-        $zone_id = "-1";
-        if (isset($_GET['id']) && Validator::is_number($_GET['id'])) {
-            $zone_id = htmlspecialchars($_GET['id']);
-        }
-
-        if ($zone_id == "-1") {
+        $zone_id = $this->getSafeRequestValue('id');
+        if (!$zone_id || !Validator::isNumber($zone_id)) {
             $this->showError(_('Invalid or unexpected input given.'));
+            return;
         }
 
-        $user_is_zone_owner = UserManager::verify_user_is_owner_zoneid($this->db, $zone_id);
+        $zone_id = (int) $zone_id;
 
-        (UserManager::verify_permission($this->db, 'user_view_others')) ? $perm_view_others = "1" : $perm_view_others = "0";
-
+        // Early permission check - validate DNSSEC access before any operations
         $perm_view = Permission::getViewPermission($this->db);
+        $user_is_zone_owner = UserManager::verifyUserIsOwnerZoneId($this->db, $zone_id);
 
-        if ($perm_view == "none" || $perm_view == "own" && $user_is_zone_owner == "0") {
-            $this->showError(_("You do not have the permission to view this zone."));
+        // Check view permission first
+        if ($perm_view == "none" || ($perm_view == "own" && !$user_is_zone_owner)) {
+            $this->showError(_("You do not have permission to view this zone."));
+            return;
         }
 
+        // Validate zone existence
         $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-        if ($dnsRecord->zone_id_exists($zone_id) == "0") {
+        if (!$dnsRecord->zoneIdExists($zone_id)) {
             $this->showError(_('There is no zone with this ID.'));
+            return;
         }
+
+        (UserManager::verifyPermission($this->db, 'user_view_others')) ? $perm_view_others = "1" : $perm_view_others = "0";
 
         $this->showKeys($zone_id, $pdnssec_use);
     }
 
-    public function showKeys(string $zone_id, $pdnssec_use): void
+    public function showKeys(int $zone_id, $pdnssec_use): void
     {
         $dnsRecord = new DnsRecord($this->db, $this->getConfig());
 
-        $domain_name = $dnsRecord->get_domain_name_by_id($zone_id);
-        $domain_type = $dnsRecord->get_domain_type($zone_id);
-        $record_count = $dnsRecord->count_zone_records($zone_id);
-        $zone_template_id = DnsRecord::get_zone_template($this->db, $zone_id);
+        $domain_name = $dnsRecord->getDomainNameById($zone_id);
+        $domain_type = $dnsRecord->getDomainType($zone_id);
+        $record_count = $dnsRecord->countZoneRecords($zone_id);
+        $zone_template_id = DnsRecord::getZoneTemplate($this->db, $zone_id);
 
         $dnssecProvider = DnssecProviderFactory::create($this->db, $this->getConfig());
         $dnskey_records = $dnssecProvider->getDnsKeyRecords($domain_name);
         $ds_records = $dnssecProvider->getDsRecords($domain_name);
 
         if (str_starts_with($domain_name, "xn--")) {
-            $idn_zone_name = idn_to_utf8($domain_name, IDNA_NONTRANSITIONAL_TO_ASCII);
+            $idn_zone_name = DnsIdnService::toUtf8($domain_name);
         } else {
             $idn_zone_name = "";
         }
@@ -102,6 +107,7 @@ class DnssecDsDnskeyController extends BaseController
             'record_count' => $record_count,
             'zone_id' => $zone_id,
             'zone_template_id' => $zone_template_id,
+            'is_reverse_zone' => DnsHelper::isReverseZone($domain_name),
         ]);
     }
 }

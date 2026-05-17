@@ -1,0 +1,17 @@
+{% extends "base.html.twig" %}
+
+{% block title %}Your Verification Code{% endblock %}
+
+{% block content %}
+    <h2 class="heading">Your Verification Code</h2>
+
+    <p>Your verification code for {{ appName }} is:</p>
+
+    <div style="border-radius: 8px; padding: 20px; text-align: center; margin: 20px 0;" class="code-container">
+        <span style="font-size: 32px; font-weight: bold; letter-spacing: 4px;">{{ verificationCode }}</span>
+    </div>
+
+    <p><strong>This code will expire at {{ expireTime }} (in 10 minutes).</strong></p>
+
+    <p>If you did not request this verification code, please ignore this email.</p>
+{% endblock %}

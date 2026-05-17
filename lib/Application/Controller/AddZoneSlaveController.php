@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -25,7 +25,7 @@
  *
  * @package     Poweradmin
  * @copyright   2007-2010 Rejo Zenger <rejo@zenger.nl>
- * @copyright   2010-2024 Poweradmin Development Team
+ * @copyright   2010-2025 Poweradmin Development Team
  * @license     https://opensource.org/licenses/GPL-3.0 GPL
  */
 
@@ -33,26 +33,47 @@ namespace Poweradmin\Application\Controller;
 
 use Poweradmin\BaseController;
 use Poweradmin\Domain\Model\UserManager;
-use Poweradmin\Domain\Service\Dns;
+use Poweradmin\Domain\Service\DnsIdnService;
 use Poweradmin\Domain\Service\DnsRecord;
+use Poweradmin\Domain\Service\DnsValidation\HostnameValidator;
+use Poweradmin\Domain\Service\DnsValidation\IPAddressValidator;
+use Poweradmin\Domain\Service\UserContextService;
+use Poweradmin\Domain\Service\ZoneOwnershipModeService;
+use Poweradmin\Domain\Utility\DnsHelper;
 use Poweradmin\Infrastructure\Logger\LegacyLogger;
-use Valitron;
+use Poweradmin\Infrastructure\Repository\DbUserGroupRepository;
+use Poweradmin\Infrastructure\Utility\IpAddressRetriever;
+use Symfony\Component\Validator\Constraints as Assert;
 
 class AddZoneSlaveController extends BaseController
 {
-
-    private LegacyLogger $logger;
+    private LegacyLogger $auditLogger;
+    private IPAddressValidator $ipAddressValidator;
+    private IpAddressRetriever $ipAddressRetriever;
+    private UserContextService $userContextService;
 
     public function __construct(array $request)
     {
         parent::__construct($request);
-
-        $this->logger = new LegacyLogger($this->db);
+        $this->auditLogger = new LegacyLogger($this->db);
+        $this->ipAddressValidator = new IPAddressValidator();
+        $this->ipAddressRetriever = new IpAddressRetriever($_SERVER);
+        $this->userContextService = new UserContextService();
     }
 
     public function run(): void
     {
         $this->checkPermission('zone_slave_add', _("You do not have the permission to add a slave zone."));
+
+        // Set the current page for navigation highlighting
+        $this->setCurrentPage('add_zone_slave');
+        $this->setPageTitle(_('Add Secondary Zone'));
+
+        $blocker = $this->getOwnerOptionsBlocker();
+        if ($blocker !== null) {
+            $this->showError($blocker);
+            return;
+        }
 
         if ($this->isPost()) {
             $this->validateCsrfToken();
@@ -62,58 +83,194 @@ class AddZoneSlaveController extends BaseController
         }
     }
 
+    private function getOwnerOptionsBlocker(): ?string
+    {
+        $ownershipMode = new ZoneOwnershipModeService($this->config);
+        if ($ownershipMode->isUserOwnerAllowed()) {
+            return null;
+        }
+        $userGroupRepo = new DbUserGroupRepository($this->db);
+        if (UserManager::verifyPermission($this->db, 'user_is_ueberuser')) {
+            if (empty($userGroupRepo->findAll())) {
+                return _('Zone ownership mode is groups_only but no groups exist. Create a group before adding zones.');
+            }
+            return null;
+        }
+        if (empty($userGroupRepo->findByUserId($this->userContextService->getLoggedInUserId()))) {
+            return _('Zone ownership mode is groups_only but you are not a member of any group. Ask an administrator to add you to a group before creating zones.');
+        }
+        return null;
+    }
+
     private function addZone(): void
     {
-        $v = new Valitron\Validator($_POST);
-        $v->rules([
-            'required' => ['owner', 'domain', 'slave_master'],
-            'integer' => ['owner'],
-        ]);
-        if (!$v->validate()) {
-            $this->showFirstError($v->errors());
+        $constraints = [
+            'domain' => [
+                new Assert\NotBlank()
+            ],
+            'slave_master' => [
+                new Assert\NotBlank()
+            ]
+        ];
+
+        $this->setValidationConstraints($constraints);
+
+        if (!$this->doValidateRequest($_POST)) {
+            $this->showFirstValidationError($_POST);
         }
 
-        $dns_third_level_check = $this->config('dns_third_level_check');
+        $dns_third_level_check = $this->config->get('dns', 'third_level_check', false);
+
+        $ownershipMode = new ZoneOwnershipModeService($this->config);
 
         $type = "SLAVE";
-        $owner = $_POST['owner'];
+        $owner = $ownershipMode->isUserOwnerAllowed() && !empty($_POST['owner']) ? (int)$_POST['owner'] : null;
         $master = $_POST['slave_master'];
-        $zone = idn_to_ascii(trim($_POST['domain']), IDNA_NONTRANSITIONAL_TO_ASCII);
+        $zone = DnsIdnService::toPunycode(trim($_POST['domain']));
+        $selected_groups = $ownershipMode->isGroupOwnerAllowed() && isset($_POST['groups']) && is_array($_POST['groups']) ?
+            array_map('intval', $_POST['groups']) : [];
 
-        $dns = new Dns($this->db, $this->getConfig());
+        // Validate: at least one owner (user or group) must be selected
+        if ($owner === null && empty($selected_groups)) {
+            $this->setMessage('add_zone_slave', 'error', _('At least one user or group must be selected as owner.'));
+            $this->showForm();
+            return;
+        }
+
+        // Block assigning a zone to a different user without elevated permission
+        $callerId = $this->userContextService->getLoggedInUserId();
+        if ($owner !== null && $owner !== $callerId) {
+            $isAdmin = UserManager::verifyPermission($this->db, 'user_is_ueberuser');
+            if (!$isAdmin && !UserManager::verifyPermission($this->db, 'zone_content_edit_others')) {
+                $this->setMessage('add_zone_slave', 'error', _('You do not have permission to create zones for other users.'));
+                $this->showForm();
+                return;
+            }
+        }
+
+        // Validate submitted group IDs against user's allowed groups
+        if (!empty($selected_groups)) {
+            $userGroupRepo = new DbUserGroupRepository($this->db);
+            $existing = $userGroupRepo->findExistingIds($selected_groups);
+            $unknown = array_values(array_diff($selected_groups, $existing));
+            if (!empty($unknown)) {
+                $this->setMessage('add_zone_slave', 'error', sprintf(_('Unknown group ID(s): %s'), implode(',', $unknown)));
+                $this->showForm();
+                return;
+            }
+            $selected_groups = $existing;
+
+            $isAdmin = UserManager::verifyPermission($this->db, 'user_is_ueberuser');
+            if (!$isAdmin) {
+                $allowedGroups = $userGroupRepo->findByUserId($_SESSION['userid']);
+                $allowedGroupIds = array_map(fn($g) => $g->getId(), $allowedGroups);
+                $disallowed = array_values(array_diff($selected_groups, $allowedGroupIds));
+                if (!empty($disallowed)) {
+                    $this->setMessage('add_zone_slave', 'error', sprintf(_('You can only assign groups you are a member of (disallowed: %s)'), implode(',', $disallowed)));
+                    $this->showForm();
+                    return;
+                }
+            }
+        }
+
         $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-        if (!$dns->is_valid_hostname_fqdn($zone, 0)) {
+        $hostnameValidator = new HostnameValidator($this->config);
+        if (!$hostnameValidator->isValid($zone)) {
             $this->setMessage('add_zone_slave', 'error', _('Invalid hostname.'));
             $this->showForm();
-        } elseif ($dns_third_level_check && DnsRecord::get_domain_level($zone) > 2 && $dnsRecord->domain_exists(DnsRecord::get_second_level_domain($zone))) {
+        } elseif ($dns_third_level_check && DnsRecord::getDomainLevel($zone) > 2 && $dnsRecord->domainExists(DnsRecord::getSecondLevelDomain($zone))) {
             $this->setMessage('add_zone_slave', 'error', _('There is already a zone with this name.'));
             $this->showForm();
-        } elseif ($dnsRecord->domain_exists($zone) || $dnsRecord->record_name_exists($zone)) {
+        } elseif ($dnsRecord->domainExists($zone) || $dnsRecord->hasNonDelegationRecords($zone)) {
             $this->setMessage('add_zone_slave', 'error', _('There is already a zone with this name.'));
             $this->showForm();
-        } elseif (!Dns::are_multiple_valid_ips($master)) {
+        } elseif (!$this->ipAddressValidator->areMultipleValidIPs($master)) {
             $this->setMessage('add_zone_slave', 'error', _('This is not a valid IPv4 or IPv6 address.'));
             $this->showForm();
         } else {
             $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-            if ($dnsRecord->add_domain($this->db, $zone, $owner, $type, $master, 'none')) {
-                $zone_id = $dnsRecord->get_zone_id_from_name($zone);
-                $this->logger->log_info(sprintf('client_ip:%s user:%s operation:add_zone zone:%s zone_type:SLAVE zone_master:%s',
-                    $_SERVER['REMOTE_ADDR'], $_SESSION["userlogin"],
-                    $zone, $master), $zone_id);
+            if ($dnsRecord->addDomain($this->db, $zone, $owner, $type, $master, 'none', $selected_groups)) {
+                $zone_id = $dnsRecord->getZoneIdFromName($zone);
 
-                $this->setMessage('list_zones', 'success', _('Zone has been added successfully.'));
-                $this->redirect('index.php', ['page'=> 'list_zones']);
+                $this->auditLogger->logInfo(sprintf(
+                    'client_ip:%s user:%s operation:add_zone zone:%s zone_type:SLAVE zone_master:%s',
+                    $this->ipAddressRetriever->getClientIp(),
+                    $this->userContextService->getLoggedInUsername(),
+                    $zone,
+                    $master
+                ), $zone_id);
+
+                // Check if the zone is a reverse zone and redirect accordingly
+                if (DnsHelper::isReverseZone($zone)) {
+                    $this->setMessage('list_reverse_zones', 'success', _('Zone has been added successfully.'));
+                    $this->redirect('/zones/reverse');
+                } else {
+                    $this->setMessage('list_forward_zones', 'success', _('Zone has been added successfully.'));
+                    $this->redirect('/zones/forward');
+                }
             }
         }
     }
 
     private function showForm(): void
     {
+        // Keep the submitted values if there was an error
+        $domain_value = isset($_POST['domain']) ? htmlspecialchars($_POST['domain']) : '';
+        $slave_master_value = isset($_POST['slave_master']) ? htmlspecialchars($_POST['slave_master']) : '';
+
+        // Safely handle the owner value - ensure it's an integer or preserve empty selection
+        if (isset($_POST['owner'])) {
+            if ($_POST['owner'] === '') {
+                // Empty value means "no user owner" was explicitly selected
+                $owner_value = '';
+            } else {
+                $owner_id = filter_var($_POST['owner'], FILTER_VALIDATE_INT);
+                // Verify that the owner ID exists among valid users
+                $valid_users = UserManager::showUsers($this->db);
+                $valid_owner_ids = array_column($valid_users, 'id');
+                $owner_value = ($owner_id !== false && in_array($owner_id, $valid_owner_ids)) ? $owner_id : $_SESSION['userid'];
+            }
+        } else {
+            // No POST data, default to current user
+            $owner_value = $_SESSION['userid'];
+        }
+
+        $is_post_request = !empty($_POST);
+
+        // Fetch groups for the dropdown - admins see all, others see only their own
+        $userGroupRepo = new DbUserGroupRepository($this->db);
+        $isAdmin = UserManager::verifyPermission($this->db, 'user_is_ueberuser');
+        $allGroups = $isAdmin ? $userGroupRepo->findAll() : $userGroupRepo->findByUserId($_SESSION['userid']);
+
+        // Fetch member counts for all groups in a single query
+        $groupIds = array_map(fn($g) => $g->getId(), $allGroups);
+        $memberCounts = $userGroupRepo->getMemberCountsByGroupIds($groupIds);
+
+        // Handle selected groups on error re-render
+        $selected_groups = isset($_POST['groups']) && is_array($_POST['groups']) ?
+            array_map('intval', $_POST['groups']) : [];
+
+        $ownershipMode = new ZoneOwnershipModeService($this->config);
+
+        // Preserve reverse-zone context so the form returns to the reverse list
+        $is_reverse_zone = (isset($_GET['type']) && $_GET['type'] === 'reverse')
+            || (isset($_POST['type']) && $_POST['type'] === 'reverse');
+
         $this->render('add_zone_slave.html', [
-            'users' => UserManager::show_users($this->db),
+            'is_reverse_zone' => $is_reverse_zone,
+            'users' => UserManager::showUsers($this->db),
             'session_user_id' => $_SESSION['userid'],
-            'perm_view_others' => UserManager::verify_permission($this->db, 'user_view_others'),
+            'perm_view_others' => UserManager::verifyPermission($this->db, 'user_view_others'),
+            'domain_value' => $domain_value,
+            'slave_master_value' => $slave_master_value,
+            'owner_value' => $owner_value,
+            'is_post' => $is_post_request,
+            'all_groups' => $allGroups,
+            'group_member_counts' => $memberCounts,
+            'selected_groups' => $selected_groups,
+            'user_owner_allowed' => $ownershipMode->isUserOwnerAllowed(),
+            'group_owner_allowed' => $ownershipMode->isGroupOwnerAllowed(),
+            // Don't pass raw POST data to the template for security
         ]);
     }
 }

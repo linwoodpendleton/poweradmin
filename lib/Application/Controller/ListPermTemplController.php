@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -25,7 +25,7 @@
  *
  * @package     Poweradmin
  * @copyright   2007-2010 Rejo Zenger <rejo@zenger.nl>
- * @copyright   2010-2024 Poweradmin Development Team
+ * @copyright   2010-2025 Poweradmin Development Team
  * @license     https://opensource.org/licenses/GPL-3.0 GPL
  */
 
@@ -41,14 +41,33 @@ class ListPermTemplController extends BaseController
     {
         $this->checkPermission('templ_perm_edit', _("You do not have the permission to edit permission templates."));
 
+        // Set the current page for navigation highlighting
+        $this->setCurrentPage('list_perm_templ');
+        $this->setPageTitle(_('Permission Templates'));
+
         $this->showListPermTempl();
     }
 
     private function showListPermTempl(): void
     {
+        $showUser = $this->config->get('permissions', 'show_user_access_templates', true);
+        $showGroup = $this->config->get('permissions', 'show_group_access_templates', true);
+
+        if ($showUser && $showGroup) {
+            $templates = UserManager::listPermissionTemplates($this->db);
+        } elseif ($showGroup) {
+            $templates = UserManager::listPermissionTemplates($this->db, 'group');
+        } elseif ($showUser) {
+            $templates = UserManager::listPermissionTemplates($this->db, 'user');
+        } else {
+            $templates = UserManager::listPermissionTemplates($this->db);
+        }
+
         $this->render('list_perm_templ.html', [
-            'templ_perm_add' => UserManager::verify_permission($this->db, 'templ_perm_add'),
-            'permission_templates' => UserManager::list_permission_templates($this->db),
+            'templ_perm_add' => UserManager::verifyPermission($this->db, 'templ_perm_add'),
+            'permission_templates' => $templates,
+            'show_user_access_templates' => $showUser,
+            'show_group_access_templates' => $showGroup,
         ]);
     }
 }

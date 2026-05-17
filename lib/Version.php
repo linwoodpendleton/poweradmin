@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2026 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -22,7 +22,17 @@
 
 namespace Poweradmin;
 
+/**
+ * Class Version
+ *
+ * This class contains the version information for the Poweradmin application.
+ */
 class Version
 {
-    const VERSION = '3.9.0';
+    /**
+     * The current version of the Poweradmin application.
+     *
+     * @var string
+     */
+    public final const VERSION = '4.4.0';
 }

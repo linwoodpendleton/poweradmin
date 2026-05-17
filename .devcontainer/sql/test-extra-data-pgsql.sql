@@ -1,0 +1,280 @@
+-- PostgreSQL Test Data: Extra Comprehensive Data
+-- Purpose: Add additional test data for SLAVE/NATIVE zones, supermasters, expired API keys,
+--          zone template sync, and login attempts
+-- Requires: test-users-permissions-pgsql.sql and test-reverse-zones-templates-pgsql.sql first
+--
+-- This script creates:
+-- - 8 new zones (group-only, viewer, slave, native, disabled-forward, disabled-reverse, no-soa-forward, no-soa-reverse)
+-- - 3 supermaster records (IPv4 + IPv6)
+-- - 1 expired API key
+-- - 2 zone template sync entries
+-- - 5 login attempt records
+--
+-- Usage: docker exec -i -e PGPASSWORD=poweradmin postgres psql -U pdns -d pdns < test-extra-data-pgsql.sql
+
+-- =============================================================================
+-- ADDITIONAL ZONES
+-- =============================================================================
+
+-- Group-only zone (no direct owner, managed via groups)
+INSERT INTO domains (name, type) VALUES ('group-only-zone.example.com', 'MASTER')
+ON CONFLICT (name) DO NOTHING;
+
+-- Viewer zone (viewer currently has no zones to view)
+INSERT INTO domains (name, type) VALUES ('viewer-zone.example.com', 'MASTER')
+ON CONFLICT (name) DO NOTHING;
+
+-- Slave zone (tests SLAVE zone type)
+INSERT INTO domains (name, type, master) VALUES ('slave-zone.example.com', 'SLAVE', '10.0.0.1')
+ON CONFLICT (name) DO NOTHING;
+
+-- Native zone (tests NATIVE zone type)
+INSERT INTO domains (name, type) VALUES ('native-zone.example.com', 'NATIVE')
+ON CONFLICT (name) DO NOTHING;
+
+-- Disabled zone (SOA disabled = entire zone disabled per PowerDNS semantics)
+INSERT INTO domains (name, type) VALUES ('disabled-zone.example.com', 'MASTER')
+ON CONFLICT (name) DO NOTHING;
+
+-- Disabled reverse zone (forward + reverse coverage for the disabled marker)
+INSERT INTO domains (name, type) VALUES ('99.in-addr.arpa', 'MASTER')
+ON CONFLICT (name) DO NOTHING;
+
+-- Zones with no SOA at all (broken state - PowerDNS cannot serve them)
+INSERT INTO domains (name, type) VALUES ('no-soa-zone.example.com', 'MASTER')
+ON CONFLICT (name) DO NOTHING;
+INSERT INTO domains (name, type) VALUES ('100.in-addr.arpa', 'MASTER')
+ON CONFLICT (name) DO NOTHING;
+
+-- Add SOA records for MASTER and NATIVE zones (not SLAVE)
+INSERT INTO records (domain_id, name, type, content, ttl, prio)
+SELECT d.id, d.name, 'SOA',
+       'ns1.example.com. hostmaster.example.com. ' || EXTRACT(EPOCH FROM NOW())::bigint || ' 10800 3600 604800 86400',
+       86400, 0
+FROM domains d
+WHERE d.name IN ('group-only-zone.example.com', 'viewer-zone.example.com', 'native-zone.example.com')
+  AND NOT EXISTS (SELECT 1 FROM records r WHERE r.domain_id = d.id AND r.type = 'SOA');
+
+-- Disabled SOA for disabled-zone (PowerDNS treats SOA disabled=true as zone-wide disable)
+INSERT INTO records (domain_id, name, type, content, ttl, prio, disabled)
+SELECT d.id, d.name, 'SOA',
+       'ns1.example.com. hostmaster.example.com. ' || EXTRACT(EPOCH FROM NOW())::bigint || ' 10800 3600 604800 86400',
+       86400, 0, true
+FROM domains d
+WHERE d.name IN ('disabled-zone.example.com', '99.in-addr.arpa')
+  AND NOT EXISTS (SELECT 1 FROM records r WHERE r.domain_id = d.id AND r.type = 'SOA');
+
+-- Add NS records for MASTER and NATIVE zones
+INSERT INTO records (domain_id, name, type, content, ttl, prio)
+SELECT d.id, d.name, 'NS', 'ns1.example.com.', 86400, 0
+FROM domains d
+WHERE d.name IN ('group-only-zone.example.com', 'viewer-zone.example.com', 'native-zone.example.com')
+  AND NOT EXISTS (SELECT 1 FROM records r WHERE r.domain_id = d.id AND r.type = 'NS' AND r.content = 'ns1.example.com.');
+
+INSERT INTO records (domain_id, name, type, content, ttl, prio)
+SELECT d.id, d.name, 'NS', 'ns2.example.com.', 86400, 0
+FROM domains d
+WHERE d.name IN ('group-only-zone.example.com', 'viewer-zone.example.com', 'native-zone.example.com')
+  AND NOT EXISTS (SELECT 1 FROM records r WHERE r.domain_id = d.id AND r.type = 'NS' AND r.content = 'ns2.example.com.');
+
+-- Add sample A record for viewer zone
+INSERT INTO records (domain_id, name, type, content, ttl, prio)
+SELECT d.id, 'www.' || d.name, 'A', '192.0.2.100', 3600, 0
+FROM domains d
+WHERE d.name = 'viewer-zone.example.com'
+  AND NOT EXISTS (SELECT 1 FROM records r WHERE r.domain_id = d.id AND r.name = 'www.' || d.name AND r.type = 'A');
+
+-- Update sequences
+SELECT setval('domains_id_seq', (SELECT MAX(id) FROM domains));
+SELECT setval('records_id_seq', (SELECT MAX(id) FROM records));
+
+-- =============================================================================
+-- SUPERMASTERS
+-- =============================================================================
+
+-- IPv4 supermaster
+INSERT INTO supermasters (ip, nameserver, account) VALUES ('10.0.0.1', 'ns1.supermaster.example.com', 'admin')
+ON CONFLICT (ip, nameserver) DO NOTHING;
+
+-- Second IPv4 supermaster
+INSERT INTO supermasters (ip, nameserver, account) VALUES ('10.0.0.2', 'ns2.supermaster.example.com', 'admin')
+ON CONFLICT (ip, nameserver) DO NOTHING;
+
+-- IPv6 supermaster
+INSERT INTO supermasters (ip, nameserver, account) VALUES ('2001:db8::1', 'ns3.supermaster.example.com', 'admin')
+ON CONFLICT (ip, nameserver) DO NOTHING;
+
+-- =============================================================================
+-- ZONE OWNERSHIP
+-- =============================================================================
+
+-- Viewer owns viewer-zone.example.com
+INSERT INTO zones (domain_id, owner, zone_templ_id, zone_name)
+SELECT d.id, u.id, 0, d.name
+FROM domains d, users u
+WHERE d.name = 'viewer-zone.example.com' AND u.username = 'viewer'
+  AND NOT EXISTS (SELECT 1 FROM zones z WHERE z.domain_id = d.id AND z.owner = u.id);
+
+-- Admin owns slave-zone.example.com, linked to "Standard Web Zone" template.
+-- This zone is intentionally seeded with mismatched zones.id != zones.domain_id
+-- (it's inserted after viewer-zone, which separates the two id sequences) so the
+-- "Update zones from template" flow can catch regressions like #1210, where the
+-- code accidentally writes domain_id into zone_template_sync.zone_id (FK to zones.id).
+INSERT INTO zones (domain_id, owner, zone_templ_id, zone_name)
+SELECT d.id, u.id, COALESCE((SELECT id FROM zone_templ WHERE name = 'Standard Web Zone'), 0), d.name
+FROM domains d, users u
+WHERE d.name = 'slave-zone.example.com' AND u.username = 'admin'
+  AND NOT EXISTS (SELECT 1 FROM zones z WHERE z.domain_id = d.id AND z.owner = u.id);
+
+-- Admin owns native-zone.example.com
+INSERT INTO zones (domain_id, owner, zone_templ_id, zone_name)
+SELECT d.id, u.id, 0, d.name
+FROM domains d, users u
+WHERE d.name = 'native-zone.example.com' AND u.username = 'admin'
+  AND NOT EXISTS (SELECT 1 FROM zones z WHERE z.domain_id = d.id AND z.owner = u.id);
+
+-- Admin owns the disabled and no-SOA fixtures (forward + reverse)
+INSERT INTO zones (domain_id, owner, zone_templ_id, zone_name)
+SELECT d.id, u.id, 0, d.name
+FROM domains d, users u
+WHERE d.name IN ('disabled-zone.example.com', '99.in-addr.arpa', 'no-soa-zone.example.com', '100.in-addr.arpa') AND u.username = 'admin'
+  AND NOT EXISTS (SELECT 1 FROM zones z WHERE z.domain_id = d.id AND z.owner = u.id);
+
+-- group-only-zone.example.com has NO direct owner (only group ownership)
+INSERT INTO zones (domain_id, owner, zone_templ_id, zone_name)
+SELECT d.id, NULL, 0, d.name
+FROM domains d
+WHERE d.name = 'group-only-zone.example.com'
+  AND NOT EXISTS (SELECT 1 FROM zones z WHERE z.domain_id = d.id);
+
+-- Update sequence
+SELECT setval('zones_id_seq', (SELECT MAX(id) FROM zones));
+
+-- =============================================================================
+-- EXPIRED API KEY
+-- =============================================================================
+
+INSERT INTO api_keys (name, secret_key, created_by, disabled, expires_at)
+SELECT 'Expired Testing Key', 'test-api-key-expired-for-testing-99999', u.id, false, '2024-01-01 00:00:00'::timestamp
+FROM users u
+WHERE u.username = 'admin'
+  AND NOT EXISTS (SELECT 1 FROM api_keys WHERE secret_key = 'test-api-key-expired-for-testing-99999');
+
+-- Update sequence
+SELECT setval('api_keys_id_seq', COALESCE((SELECT MAX(id) FROM api_keys), 1));
+
+-- =============================================================================
+-- ZONE TEMPLATE SYNC ENTRIES
+-- =============================================================================
+
+-- Link Standard Web Zone template to admin-zone (synced)
+INSERT INTO zone_template_sync (zone_id, zone_templ_id, last_synced, needs_sync)
+SELECT z.id, zt.id, NOW(), false
+FROM zones z
+JOIN domains d ON z.domain_id = d.id
+CROSS JOIN zone_templ zt
+WHERE d.name = 'admin-zone.example.com' AND zt.name = 'Standard Web Zone'
+  AND NOT EXISTS (SELECT 1 FROM zone_template_sync zts WHERE zts.zone_id = z.id AND zts.zone_templ_id = zt.id)
+LIMIT 1;
+
+-- Link Standard Web Zone template to manager-zone (needs sync)
+INSERT INTO zone_template_sync (zone_id, zone_templ_id, last_synced, needs_sync)
+SELECT z.id, zt.id, NOW() - INTERVAL '7 days', true
+FROM zones z
+JOIN domains d ON z.domain_id = d.id
+CROSS JOIN zone_templ zt
+WHERE d.name = 'manager-zone.example.com' AND zt.name = 'Standard Web Zone'
+  AND NOT EXISTS (SELECT 1 FROM zone_template_sync zts WHERE zts.zone_id = z.id AND zts.zone_templ_id = zt.id)
+LIMIT 1;
+
+-- Link Standard Web Zone template to slave-zone (needs sync). slave-zone has
+-- zones.id != domain_id, so an "Update zones" run on this template exercises
+-- the id mapping path that issue #1210 broke.
+INSERT INTO zone_template_sync (zone_id, zone_templ_id, last_synced, needs_sync)
+SELECT z.id, zt.id, NOW() - INTERVAL '1 day', true
+FROM zones z
+JOIN domains d ON z.domain_id = d.id
+CROSS JOIN zone_templ zt
+WHERE d.name = 'slave-zone.example.com' AND zt.name = 'Standard Web Zone'
+  AND NOT EXISTS (SELECT 1 FROM zone_template_sync zts WHERE zts.zone_id = z.id AND zts.zone_templ_id = zt.id)
+LIMIT 1;
+
+-- =============================================================================
+-- LOGIN ATTEMPTS
+-- =============================================================================
+
+-- Successful login by admin
+INSERT INTO login_attempts (user_id, ip_address, timestamp, successful)
+SELECT u.id, '127.0.0.1', EXTRACT(EPOCH FROM NOW())::bigint - 3600, 1
+FROM users u
+WHERE u.username = 'admin'
+  AND NOT EXISTS (SELECT 1 FROM login_attempts la WHERE la.user_id = u.id AND la.ip_address = '127.0.0.1' AND la.successful = 1);
+
+-- Successful login by manager
+INSERT INTO login_attempts (user_id, ip_address, timestamp, successful)
+SELECT u.id, '127.0.0.1', EXTRACT(EPOCH FROM NOW())::bigint - 1800, 1
+FROM users u
+WHERE u.username = 'manager'
+  AND NOT EXISTS (SELECT 1 FROM login_attempts la WHERE la.user_id = u.id AND la.ip_address = '127.0.0.1' AND la.successful = 1);
+
+-- Failed login attempt (unknown user)
+INSERT INTO login_attempts (user_id, ip_address, timestamp, successful)
+SELECT NULL, '203.0.113.50', EXTRACT(EPOCH FROM NOW())::bigint - 7200, 0
+WHERE NOT EXISTS (SELECT 1 FROM login_attempts la WHERE la.ip_address = '203.0.113.50' AND la.successful = 0);
+
+-- Failed login attempt (brute force from different IP)
+INSERT INTO login_attempts (user_id, ip_address, timestamp, successful)
+SELECT NULL, '198.51.100.25', EXTRACT(EPOCH FROM NOW())::bigint - 600, 0
+WHERE NOT EXISTS (SELECT 1 FROM login_attempts la WHERE la.ip_address = '198.51.100.25' AND la.successful = 0);
+
+-- Failed login attempt (wrong password for admin)
+INSERT INTO login_attempts (user_id, ip_address, timestamp, successful)
+SELECT u.id, '192.168.1.100', EXTRACT(EPOCH FROM NOW())::bigint - 300, 0
+FROM users u
+WHERE u.username = 'admin'
+  AND NOT EXISTS (SELECT 1 FROM login_attempts la WHERE la.user_id = u.id AND la.ip_address = '192.168.1.100' AND la.successful = 0);
+
+-- Update sequence
+SELECT setval('login_attempts_id_seq', COALESCE((SELECT MAX(id) FROM login_attempts), 1));
+
+-- =============================================================================
+-- VERIFICATION
+-- =============================================================================
+
+-- Verify new zones
+SELECT d.name, d.type, d.master
+FROM domains d
+WHERE d.name IN ('group-only-zone.example.com', 'viewer-zone.example.com', 'slave-zone.example.com', 'native-zone.example.com', 'disabled-zone.example.com', '99.in-addr.arpa', 'no-soa-zone.example.com', '100.in-addr.arpa')
+ORDER BY d.name;
+
+-- Verify supermasters
+SELECT ip, nameserver, account
+FROM supermasters
+ORDER BY ip::text;
+
+-- Verify zone ownership including NULL owner
+SELECT d.name, u.username AS owner
+FROM zones z
+JOIN domains d ON z.domain_id = d.id
+LEFT JOIN users u ON z.owner = u.id
+WHERE d.name IN ('group-only-zone.example.com', 'viewer-zone.example.com', 'slave-zone.example.com', 'native-zone.example.com', 'disabled-zone.example.com', '99.in-addr.arpa', 'no-soa-zone.example.com', '100.in-addr.arpa')
+ORDER BY d.name;
+
+-- Verify API keys
+SELECT name, secret_key, disabled, expires_at
+FROM api_keys
+ORDER BY name;
+
+-- Verify zone template sync
+SELECT d.name AS zone, zt.name AS template, zts.needs_sync, zts.last_synced
+FROM zone_template_sync zts
+JOIN zones z ON zts.zone_id = z.id
+JOIN domains d ON z.domain_id = d.id
+JOIN zone_templ zt ON zts.zone_templ_id = zt.id
+ORDER BY d.name;
+
+-- Verify login attempts
+SELECT la.ip_address, la.successful, u.username
+FROM login_attempts la
+LEFT JOIN users u ON la.user_id = u.id
+ORDER BY la.timestamp;

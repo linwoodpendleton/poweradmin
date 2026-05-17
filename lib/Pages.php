@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -22,11 +22,27 @@
 
 namespace Poweradmin;
 
+/**
+ * Class Pages
+ *
+ * This class provides a static method to retrieve a list of page identifiers.
+ *
+ * @package Poweradmin
+ */
 class Pages
 {
+    /**
+     * Get a list of page identifiers.
+     *
+     * This method returns an array of strings, each representing a page identifier
+     * used in the Poweradmin application.
+     *
+     * @return array An array of page identifiers.
+     */
     public static function getPages(): array
     {
         return [
+            '404',
             'add_perm_templ',
             'add_record',
             'add_supermaster',
@@ -35,16 +51,32 @@ class Pages
             'add_zone_slave',
             'add_zone_templ_record',
             'add_zone_templ',
+            'api/docs',
+            'api/docs/json',
+            'api/internal/validation',
+            'api/internal/user-preferences',
+            'api/internal/zone',
+            'api/v1/users',
+            'api/v1/zones',
+            'api/v1/zones_records',
+            'api/v1/permission_templates',
+            'api/v1/permissions',
+            'api_keys',
+            'batch_ptr_record',
+            'bulk_record_add',
             'bulk_registration',
             'change_password',
+            'database_consistency',
             'delete_domain',
             'delete_domains',
             'delete_perm_templ',
             'delete_record',
+            'delete_records',
             'delete_supermaster',
             'delete_user',
             'delete_zone_templ',
             'delete_zone_templ_record',
+            'edit_supermaster',
             'dnssec_add_key',
             'dnssec',
             'dnssec_delete_key',
@@ -57,21 +89,29 @@ class Pages
             'edit_user',
             'edit_zone_templ',
             'edit_zone_templ_record',
+            'ajax_geo_list',
+            'forgot_password',
             'geo_routing',
             'geo_routing_edit',
-            'ajax_geo_list',
             'index',
             'list_log_users',
             'list_log_zones',
             'list_perm_templ',
             'list_supermasters',
             'list_zone_templ',
-            'list_zones',
+            'list_forward_zones',
+            'list_reverse_zones',
+            'list_template_zones',
             'login',
             'logout',
+            'unlink_zones_templ',
+            'mfa_verify',
+            'mfa_setup',
+            'reset_password',
             'search',
-            'switch_theme',
+            'user_agreement',
             'users',
+            'pdns_status',
         ];
     }
 }

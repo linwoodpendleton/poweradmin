@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2026 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -23,23 +23,26 @@
 namespace Poweradmin\Domain\Model;
 
 use PDO;
-use Poweradmin\AppConfiguration;
-use Poweradmin\Application\Presenter\ErrorPresenter;
+use Poweradmin\Application\Service\HybridPermissionService;
 use Poweradmin\Application\Service\UserAuthenticationService;
-use Poweradmin\Domain\Error\ErrorMessage;
 use Poweradmin\Domain\Service\DnsRecord;
 use Poweradmin\Domain\Service\Validator;
-use Poweradmin\Infrastructure\Database\PDOLayer;
+use Poweradmin\Infrastructure\Configuration\ConfigurationManager;
+use Poweradmin\Infrastructure\Repository\DbUserGroupMemberRepository;
+use Poweradmin\Infrastructure\Repository\DbUserGroupRepository;
+use Poweradmin\Infrastructure\Service\MessageService;
 
 class UserManager
 {
-    private PDOLayer $db;
-    private AppConfiguration $config;
+    private PDO $db;
+    private ConfigurationManager $config;
+    private MessageService $messageService;
 
-    public function __construct(PDOLayer $db, AppConfiguration $config)
+    public function __construct(PDO $db, ConfigurationManager $config)
     {
         $this->db = $db;
         $this->config = $config;
+        $this->messageService = new MessageService();
     }
 
     /**
@@ -47,14 +50,19 @@ class UserManager
      *
      * Function to see if user has right to do something. It will check if
      * user has "ueberuser" bit set. If it isn't, it will check if the user has
-     * the specific permission. It returns "false" if the user doesn't have the
+     * the specific permission from either their direct user template or from
+     * any groups they belong to. It returns "false" if the user doesn't have the
      * right, and "true" if the user has.
+     *
+     * This function checks both:
+     * 1. Direct user permissions (from user's perm_templ)
+     * 2. Group permissions (from user_groups via user_group_members)
      *
      * @param string $arg Permission name
      *
      * @return boolean true if user has permission, false otherwise
      */
-    public static function verify_permission(object $db, string $arg): bool
+    public static function verifyPermission(object $db, string $arg): bool
     {
         $permission = $arg;
 
@@ -68,17 +76,78 @@ class UserManager
             return false;
         }
 
-        $query = $db->prepare("SELECT
-        perm_items.name AS permission
-        FROM perm_templ_items
-        LEFT JOIN perm_items ON perm_items.id = perm_templ_items.perm_id
-        LEFT JOIN perm_templ ON perm_templ.id = perm_templ_items.templ_id
-        LEFT JOIN users ON perm_templ.id = users.perm_templ
-        WHERE users.id = ?");
-        $query->execute(array($_SESSION['userid']));
+        // Query to get both direct user permissions and group permissions
+        // UNION combines permissions from both sources
+        // Note: We filter out NULL permission names to handle orphaned template items
+        $query = $db->prepare("
+            SELECT perm_items.name AS permission
+            FROM perm_templ_items
+            INNER JOIN perm_items ON perm_items.id = perm_templ_items.perm_id
+            INNER JOIN perm_templ ON perm_templ.id = perm_templ_items.templ_id
+            INNER JOIN users ON perm_templ.id = users.perm_templ
+            WHERE users.id = ? AND perm_items.name IS NOT NULL
+
+            UNION
+
+            SELECT pi.name AS permission
+            FROM user_group_members ugm
+            INNER JOIN user_groups ug ON ugm.group_id = ug.id
+            INNER JOIN perm_templ pt ON ug.perm_templ = pt.id
+            INNER JOIN perm_templ_items pti ON pt.id = pti.templ_id
+            INNER JOIN perm_items pi ON pti.perm_id = pi.id
+            WHERE ugm.user_id = ? AND pi.name IS NOT NULL
+        ");
+        $query->execute(array($_SESSION['userid'], $_SESSION['userid']));
         $cache = $query->fetchAll(PDO::FETCH_GROUP | PDO::FETCH_ASSOC);
 
         return array_key_exists('user_is_ueberuser', $cache) || array_key_exists($permission, $cache);
+    }
+
+    /**
+     * Check if a specific user has superuser permission
+     *
+     * Function to check if a specific user ID has the "user_is_ueberuser" permission
+     * from either their direct user template or from any groups they belong to.
+     *
+     * This function checks both:
+     * 1. Direct user permissions (from user's perm_templ)
+     * 2. Group permissions (from user_groups via user_group_members)
+     *
+     * @param PDO $db Database connection
+     * @param int $userId User ID to check
+     *
+     * @return bool true if user is superuser, false otherwise
+     */
+    public static function isUserSuperuser(PDO $db, int $userId): bool
+    {
+        // Check both direct user permissions and group permissions
+        // Uses same logic as verifyPermission for consistency
+        $query = $db->prepare("
+            SELECT perm_items.name AS permission
+            FROM perm_templ_items
+            INNER JOIN perm_items ON perm_items.id = perm_templ_items.perm_id
+            INNER JOIN perm_templ ON perm_templ.id = perm_templ_items.templ_id
+            INNER JOIN users ON perm_templ.id = users.perm_templ
+            WHERE users.id = ?
+                AND perm_items.name = 'user_is_ueberuser'
+                AND perm_items.name IS NOT NULL
+
+            UNION
+
+            SELECT pi.name AS permission
+            FROM user_group_members ugm
+            INNER JOIN user_groups ug ON ugm.group_id = ug.id
+            INNER JOIN perm_templ pt ON ug.perm_templ = pt.id
+            INNER JOIN perm_templ_items pti ON pt.id = pti.templ_id
+            INNER JOIN perm_items pi ON pti.perm_id = pi.id
+            WHERE ugm.user_id = ?
+                AND pi.name = 'user_is_ueberuser'
+                AND pi.name IS NOT NULL
+        ");
+        $query->execute([$userId, $userId]);
+        $result = $query->fetch();
+
+        return $result !== false;
     }
 
     /**
@@ -86,20 +155,63 @@ class UserManager
      *
      * @return array array of templates [id, name, descr]
      */
-    public static function list_permission_templates($db): array
+    public static function listPermissionTemplates($db, ?string $filter_type = null): array
     {
-        $query = "SELECT * FROM perm_templ ORDER BY name";
-        $response = $db->query($query);
+        if ($filter_type !== null && in_array($filter_type, ['user', 'group'])) {
+            $query = "SELECT * FROM perm_templ WHERE template_type = :template_type ORDER BY name";
+            $stmt = $db->prepare($query);
+            $stmt->execute([':template_type' => $filter_type]);
+            $response = $stmt;
+        } else {
+            $query = "SELECT * FROM perm_templ ORDER BY name";
+            $response = $db->query($query);
+        }
 
         $template_list = array();
         while ($template = $response->fetch()) {
             $template_list [] = array(
                 "id" => $template ['id'],
                 "name" => $template ['name'],
-                "descr" => $template ['descr']
+                "descr" => $template ['descr'],
+                "template_type" => $template ['template_type'] ?? 'user'
             );
         }
         return $template_list;
+    }
+
+    /**
+     * Get the permission template with the minimum number of permissions
+     * Useful for setting a secure default when creating new users
+     *
+     * @param object $db Database connection
+     * @param string|null $templateType Restrict to 'user' or 'group' templates; null = no filter
+     * @return int|null Template ID with minimal permissions, or null if no templates exist
+     */
+    public static function getMinimalPermissionTemplateId($db, ?string $templateType = null): ?int
+    {
+        // Find the template with the fewest permissions assigned
+        // If multiple templates have the same number of permissions, prefer by name order
+        // This query returns the template with 0 or minimal permissions
+        $query = "SELECT pt.id, pt.name, COUNT(pti.perm_id) as perm_count
+                  FROM perm_templ pt
+                  LEFT JOIN perm_templ_items pti ON pt.id = pti.templ_id";
+
+        if ($templateType !== null) {
+            $query .= " WHERE pt.template_type = :template_type";
+        }
+
+        $query .= " GROUP BY pt.id, pt.name
+                  ORDER BY perm_count ASC, pt.name ASC
+                  LIMIT 1";
+
+        $stmt = $db->prepare($query);
+        if ($templateType !== null) {
+            $stmt->bindValue(':template_type', $templateType);
+        }
+        $stmt->execute();
+        $result = $stmt->fetch();
+
+        return $result ? (int)$result['id'] : null;
     }
 
     /**
@@ -113,12 +225,14 @@ class UserManager
      *
      * @return array array with all users [id,username,fullname,email,description,active,numdomains]
      */
-    public static function show_users($db, int|string $id = '', int $rowstart = 0, int $rowamount = 9999999): array
+    public static function showUsers($db, int|string $id = '', int $rowstart = 0, int $rowamount = Constants::DEFAULT_MAX_ROWS): array
     {
         $add = '';
+        $params = [];
         if (is_numeric($id)) {
             // When a user id is given, it is excluded from the userlist returned.
-            $add = " WHERE users.id!=" . $db->quote($id, 'integer');
+            $add = " WHERE users.id != :exclude_id";
+            $params[':exclude_id'] = $id;
         }
 
         // Make a huge query.
@@ -142,10 +256,21 @@ class UserManager
 	ORDER BY
 	users.fullname";
 
+        if ($rowamount < Constants::DEFAULT_MAX_ROWS) {
+            $query .= " LIMIT " . $rowamount;
+            if ($rowstart > 0) {
+                $query .= " OFFSET " . $rowstart;
+            }
+        }
+
         // Execute the huge query.
-        $db->setLimit($rowamount, $rowstart);
-        $response = $db->query($query);
-        $db->setLimit(0);
+        if (!empty($params)) {
+            $stmt = $db->prepare($query);
+            $stmt->execute($params);
+            $response = $stmt;
+        } else {
+            $response = $db->query($query);
+        }
 
         $ret = array();
         while ($r = $response->fetch()) {
@@ -171,9 +296,11 @@ class UserManager
      *
      * @return boolean true if user exists, false if users doesnt exist
      */
-    public static function is_valid_user($db, int $id): bool
+    public static function isValidUser($db, int $id): bool
     {
-        $response = $db->queryOne("SELECT id FROM users WHERE id=" . $db->quote($id, 'integer'));
+        $stmt = $db->prepare("SELECT id FROM users WHERE id = :id");
+        $stmt->execute([':id' => $id]);
+        $response = $stmt->fetchColumn();
         return (bool)$response;
     }
 
@@ -186,9 +313,11 @@ class UserManager
      *
      * @return boolean true if exists, false if not
      */
-    public static function user_exists($db, string $user): bool
+    public static function userExists($db, string $user): bool
     {
-        $response = $db->queryOne("SELECT id FROM users WHERE username=" . $db->quote($user, 'text'));
+        $stmt = $db->prepare("SELECT id FROM users WHERE username = :username");
+        $stmt->execute([':username' => $user]);
+        $response = $stmt->fetchColumn();
         return (bool)$response;
     }
 
@@ -205,31 +334,34 @@ class UserManager
      *
      * @return boolean true on success, false otherwise
      */
-    public function delete_user(int $uid, array $zones): bool
+    public function deleteUser(int $uid, array $zones): bool
     {
-        if (($uid != $_SESSION ['userid'] && !self::verify_permission($this->db, 'user_edit_others')) || ($uid == $_SESSION ['userid'] && !self::verify_permission($this->db, 'user_edit_own'))) {
-            $error = new ErrorMessage(_("You do not have the permission to delete this user."));
-            $errorPresenter = new ErrorPresenter();
-            $errorPresenter->present($error);
+        if (($uid != $_SESSION['userid'] && !self::verifyPermission($this->db, 'user_edit_others')) || ($uid == $_SESSION['userid'] && !self::verifyPermission($this->db, 'user_edit_own'))) {
+            $this->messageService->addSystemError(_("You do not have the permission to delete this user."));
 
             return false;
         } else {
             $dnsRecord = new DnsRecord($this->db, $this->config);
             foreach ($zones as $zone) {
                 if ($zone ['target'] == "delete") {
-                    $dnsRecord->delete_domain($zone ['zid']);
+                    $dnsRecord->deleteDomain($zone ['zid']);
                 } elseif ($zone ['target'] == "new_owner") {
-                    DnsRecord::add_owner_to_zone($this->db, $zone ['zid'], $zone ['newowner']);
+                    DnsRecord::addOwnerToZone($this->db, $zone ['zid'], $zone ['newowner']);
                 }
             }
 
-            $query = "DELETE FROM zones WHERE owner = " . $this->db->quote($uid, 'integer');
-            $this->db->query($query);
+            $stmt = $this->db->prepare("DELETE FROM zones WHERE owner = :uid");
+            $stmt->execute([':uid' => $uid]);
 
-            $query = "DELETE FROM users WHERE id = " . $this->db->quote($uid, 'integer');
-            $this->db->query($query);
+            // Clean up external authentication links
+            $stmt = $this->db->prepare("DELETE FROM oidc_user_links WHERE user_id = :uid");
+            $stmt->execute([':uid' => $uid]);
 
-            ZoneTemplate::delete_zone_templ_userid($this->db, $uid);
+            $stmt = $this->db->prepare("DELETE FROM users WHERE id = :uid");
+            $stmt->execute([':uid' => $uid]);
+
+            $zoneTemplate = new ZoneTemplate($this->db, $this->config);
+            $zoneTemplate->deleteZoneTemplUserId($uid);
         }
         return true;
     }
@@ -241,23 +373,24 @@ class UserManager
      *
      * @return boolean true on success, false otherwise
      */
-    public static function delete_perm_templ($db, int $id): bool
+    public static function deletePermTempl($db, int $id): bool
     {
-        $query = "SELECT id FROM users WHERE perm_templ = " . $id;
-        $response = $db->queryOne($query);
+        $stmt = $db->prepare("SELECT id FROM users WHERE perm_templ = :id");
+        $stmt->execute([':id' => $id]);
+        $response = $stmt->fetchColumn();
 
         if ($response) {
-            $error = new ErrorMessage(_('This template is assigned to at least one user.'));
-            $errorPresenter = new ErrorPresenter();
-            $errorPresenter->present($error);
+            // Create a new MessageService instance since this is a static method
+            $messageService = new MessageService();
+            $messageService->addSystemError(_('This template is assigned to at least one user.'));
 
             return false;
         } else {
-            $query = "DELETE FROM perm_templ_items WHERE templ_id = " . $id;
-            $db->query($query);
+            $stmt = $db->prepare("DELETE FROM perm_templ_items WHERE templ_id = :id");
+            $stmt->execute([':id' => $id]);
 
-            $query = "DELETE FROM perm_templ WHERE id = " . $id;
-            $db->query($query);
+            $stmt = $db->prepare("DELETE FROM perm_templ WHERE id = :id");
+            $stmt->execute([':id' => $id]);
             return true;
         }
     }
@@ -278,19 +411,15 @@ class UserManager
      *
      * @return boolean true if succesful, false otherwise
      */
-    public function edit_user(int $id, string $user, string $fullname, string $email, string $perm_templ, string $description, int $active, string $user_password, $i_use_ldap): bool
+    public function editUser(int $id, string $user, string $fullname, string $email, string $perm_templ, string $description, int $active, string $user_password, $useLdap): bool
     {
-        $perm_edit_own = self::verify_permission($this->db, 'user_edit_own');
-        $perm_edit_others = self::verify_permission($this->db, 'user_edit_others');
+        $perm_edit_own = self::verifyPermission($this->db, 'user_edit_own');
+        $perm_edit_others = self::verifyPermission($this->db, 'user_edit_others');
 
-        if (($id == $_SESSION ["userid"] && $perm_edit_own) || ($id != $_SESSION ["userid"] && $perm_edit_others)) {
-
+        if (($id == $_SESSION["userid"] && $perm_edit_own) || ($id != $_SESSION["userid"] && $perm_edit_others)) {
             $validation = new Validator($this->db, $this->config);
-            if (!$validation->is_valid_email($email)) {
-                $error = new ErrorMessage(_('Enter a valid email address.'));
-
-                $errorPresenter = new ErrorPresenter();
-                $errorPresenter->present($error);
+            if (!$validation->isValidEmail($email)) {
+                $this->messageService->addSystemError(_('Enter a valid email address.'));
 
                 return false;
             }
@@ -308,23 +437,20 @@ class UserManager
             // user, the username should apparently be changed. If so, check if the "new"
             // username already exists.
 
-            $query = "SELECT username FROM users WHERE id = " . $this->db->quote($id, 'integer');
-            $response = $this->db->query($query);
-
-            $usercheck = $response->fetch();
+            $stmt = $this->db->prepare("SELECT username, auth_method FROM users WHERE id = :id");
+            $stmt->execute([':id' => $id]);
+            $usercheck = $stmt->fetch();
 
             if ($usercheck ['username'] != $user) {
-
                 // Username of user ID in the database is different from the name
                 // we have been given. User wants a change of username. Now, make
                 // sure it doesn't already exist.
 
-                $query = "SELECT id FROM users WHERE username = " . $this->db->quote($user, 'text');
-                $response = $this->db->queryOne($query);
+                $stmt = $this->db->prepare("SELECT id FROM users WHERE username = :username");
+                $stmt->execute([':username' => $user]);
+                $response = $stmt->fetchColumn();
                 if ($response) {
-                    $error = new ErrorMessage(_('Username exist already, please choose another one.'));
-                    $errorPresenter = new ErrorPresenter();
-                    $errorPresenter->present($error);
+                    $this->messageService->addSystemError(_('Username exist already, please choose another one.'));
 
                     return false;
                 }
@@ -335,23 +461,25 @@ class UserManager
 
             $query = "UPDATE users SET username = :username, fullname = :fullname, email = :email";
 
-            if (self::verify_permission($this->db, 'user_edit_templ_perm')) {
-                $query .= ", perm_templ = :perm_templ";
+            if (self::verifyPermission($this->db, 'user_edit_templ_perm')) {
+                $query .= ", perm_templ = :perm_templ, perm_templ_source = 'admin'";
             }
 
-            $query .= ", description = :description, active = :active, use_ldap = :use_ldap";
+            $query .= ", description = :description, active = :active, use_ldap = :use_ldap, auth_method = :auth_method";
 
-            $edit_own_perm = self::verify_permission($this->db, 'user_edit_own');
-            $passwd_edit_others_perm = self::verify_permission($this->db, 'user_passwd_edit_others');
+            $edit_own_perm = self::verifyPermission($this->db, 'user_edit_own');
+            $passwd_edit_others_perm = self::verifyPermission($this->db, 'user_passwd_edit_others');
 
+            $passwordHash = null;
             if ($user_password != "" && ($edit_own_perm || $passwd_edit_others_perm)) {
-                $config = new AppConfiguration();
+                $config = ConfigurationManager::getInstance();
+                $config->initialize();
                 $userAuthService = new UserAuthenticationService(
-                    $config->get('password_encryption'),
-                    $config->get('password_encryption_cost')
+                    $config->get('security', 'password_encryption', 'bcrypt'),
+                    $config->get('security', 'password_cost', 12)
                 );
 
-                $passwordHash = $i_use_ldap ? 'LDAP_USER' : $userAuthService->hashPassword($user_password);
+                $passwordHash = $useLdap ? 'LDAP_USER' : $userAuthService->hashPassword($user_password);
                 $query .= ", password = :password";
             }
 
@@ -364,10 +492,12 @@ class UserManager
             $stmt->bindValue(':email', $email, PDO::PARAM_STR);
             $stmt->bindValue(':description', $description, PDO::PARAM_STR);
             $stmt->bindValue(':active', $active, PDO::PARAM_INT);
-            $stmt->bindValue(':use_ldap', $i_use_ldap ?: 0, PDO::PARAM_INT);
+            $stmt->bindValue(':use_ldap', $useLdap ?: 0, PDO::PARAM_INT);
+
+            $stmt->bindValue(':auth_method', self::resolveAuthMethod((bool) $useLdap, $usercheck['auth_method'] ?? null), PDO::PARAM_STR);
             $stmt->bindValue(':id', $id, PDO::PARAM_INT);
 
-            if (self::verify_permission($this->db, 'user_edit_templ_perm')) {
+            if (self::verifyPermission($this->db, 'user_edit_templ_perm')) {
                 $stmt->bindValue(':perm_templ', $perm_templ, PDO::PARAM_INT);
             }
 
@@ -377,9 +507,7 @@ class UserManager
 
             $stmt->execute();
         } else {
-            $error = new ErrorMessage(_("You do not have the permission to edit this user."));
-            $errorPresenter = new ErrorPresenter();
-            $errorPresenter->present($error);
+            $this->messageService->addSystemError(_("You do not have the permission to edit this user."));
             return false;
         }
         return true;
@@ -393,67 +521,19 @@ class UserManager
      * @param $user_pass
      * @return void
      */
-    public static function update_user_password($db, int $id, $user_pass): void
+    public static function updateUserPassword($db, int $id, $user_pass): void
     {
-        $config = new AppConfiguration();
+        $config = ConfigurationManager::getInstance();
+        $config->initialize();
         $userAuthService = new UserAuthenticationService(
-            $config->get('password_encryption'),
-            $config->get('password_encryption_cost')
+            $config->get('security', 'password_encryption', 'bcrypt'),
+            $config->get('security', 'password_cost', 12)
         );
-        $query = "UPDATE users SET password = " . $db->quote($userAuthService->hashPassword($user_pass), 'text') . " WHERE id = " . $db->quote($id, 'integer');
-        $db->query($query);
-    }
-
-    /**
-     * Change User Password
-     *
-     * Change the pass of the user.
-     * The user is automatically logged out after the pass change.
-     *
-     * @param $db
-     * @param array $details User Details
-     *
-     * @return bool
-     */
-    public static function change_user_pass($db, array $details): bool
-    {
-        if ($details['new_password'] != $details['new_password2']) {
-            $error = new ErrorMessage(_('The two new password fields do not match.'));
-            $errorPresenter = new ErrorPresenter();
-            $errorPresenter->present($error);
-
-            return false;
-        }
-
-        $query = "SELECT id, password, use_ldap FROM users WHERE username = {$db->quote($_SESSION ["userlogin"], 'text')}";
-        $response = $db->queryRow($query);
-        
-        if ($response['use_ldap']) {
-            $error = new ErrorMessage(_('You can not change your password as LDAP user.'));
-            $errorPresenter = new ErrorPresenter();
-            $errorPresenter->present($error);
-
-            return false;
-        }
-
-        $config = new AppConfiguration();
-        $userAuthService = new UserAuthenticationService(
-            $config->get('password_encryption'),
-            $config->get('password_encryption_cost')
-        );
-
-        if ($userAuthService->verifyPassword($details['old_password'], $response['password'])) {
-            $query = "UPDATE users SET password = {$db->quote($userAuthService->hashPassword($details['new_password']), 'text')} WHERE id = {$db->quote($response['id'], 'integer')}";
-            $db->query($query);
-
-            return true;
-        }
-
-        $error = new ErrorMessage(_('You did not enter the correct current password.'));
-        $errorPresenter = new ErrorPresenter();
-        $errorPresenter->present($error);
-
-        return false;
+        $stmt = $db->prepare("UPDATE users SET password = :password WHERE id = :id");
+        $stmt->execute([
+            ':password' => $userAuthService->hashPassword($user_pass),
+            ':id' => $id
+        ]);
     }
 
     /**
@@ -465,10 +545,11 @@ class UserManager
      *
      * @return string Full Name
      */
-    public static function get_fullname_from_userid($db, int $id): string
+    public static function getFullnameFromUserId($db, int $id): string
     {
-        $response = $db->query("SELECT fullname FROM users WHERE id=" . $db->quote($id, 'integer'));
-        $r = $response->fetch();
+        $stmt = $db->prepare("SELECT fullname FROM users WHERE id = :id");
+        $stmt->execute([':id' => $id]);
+        $r = $stmt->fetch();
         return $r["fullname"];
     }
 
@@ -477,13 +558,13 @@ class UserManager
      *
      * @param int $id Domain ID
      *
-     * @return string|void array of owners for domain
-     * @todo also fetch the subowners
-     *
+     * @return string List of owners for domain as a comma-separated string
      */
-    public static function get_fullnames_owners_from_domainid($db, int $id)
+    public static function getFullnamesOwnersFromFomainId($db, int $id)
     {
-        $response = $db->query("SELECT users.id, users.fullname FROM users, zones WHERE zones.domain_id=" . $db->quote($id, 'integer') . " AND zones.owner=users.id ORDER by fullname");
+        $stmt = $db->prepare("SELECT users.id, users.fullname FROM users, zones WHERE zones.domain_id = :id AND zones.owner = users.id ORDER by fullname");
+        $stmt->execute([':id' => $id]);
+        $response = $stmt;
         if ($response) {
             $names = array();
             while ($r = $response->fetch()) {
@@ -497,17 +578,77 @@ class UserManager
     /**
      * Verify User is Zone ID owner
      *
+     * Checks if user owns the zone directly or via group membership
+     *
      * @param int $zoneid Zone ID
      *
-     * @return bool 1 if owner, 0 if not owner
+     * @return bool true if owner (directly or via group), false otherwise
      */
-    public static function verify_user_is_owner_zoneid($db, int $zoneid): bool
+    public static function verifyUserIsOwnerZoneId($db, int $zoneid): bool
     {
-        $userid = $_SESSION ["userid"];
-        $response = $db->queryOne("SELECT zones.id FROM zones
-            WHERE zones.owner = " . $db->quote($userid, 'integer') . "
-            AND zones.domain_id = " . $db->quote($zoneid, 'integer'));
-        return (bool)$response;
+        $userid = $_SESSION["userid"];
+
+        // Check direct ownership
+        $stmt = $db->prepare("SELECT zones.id FROM zones WHERE zones.owner = :userid AND zones.domain_id = :zoneid");
+        $stmt->execute([
+            ':userid' => $userid,
+            ':zoneid' => $zoneid
+        ]);
+        if ($stmt->fetchColumn()) {
+            return true;
+        }
+
+        // Check group ownership
+        $stmt = $db->prepare("
+            SELECT zg.id
+            FROM zones_groups zg
+            INNER JOIN user_group_members ugm ON zg.group_id = ugm.group_id
+            WHERE ugm.user_id = :userid AND zg.domain_id = :zoneid
+        ");
+        $stmt->execute([
+            ':userid' => $userid,
+            ':zoneid' => $zoneid
+        ]);
+        return (bool)$stmt->fetchColumn();
+    }
+
+    /**
+     * Count total users for pagination
+     *
+     * @param object $db Database connection
+     * @param int|null $specific User ID (optional)
+     *
+     * @return int Total number of users
+     */
+    public static function countUsers($db, ?int $specific = null): int
+    {
+        $userid = $_SESSION['userid'];
+
+        if ($specific) {
+            $sql_add = "AND users.id = :specific";
+        } elseif (self::verifyPermission($db, 'user_view_others')) {
+            $sql_add = "";
+        } else {
+            $sql_add = "AND users.id = :userid";
+        }
+
+        // Restrict the join to user-type templates so users assigned to a group
+        // template (legacy state) are still counted, falling under the broken-row branch.
+        $query = "SELECT COUNT(*) FROM users
+                  LEFT JOIN perm_templ ON users.perm_templ = perm_templ.id
+                       AND perm_templ.template_type = 'user'
+                  WHERE 1=1 " . $sql_add;
+
+        $stmt = $db->prepare($query);
+
+        if ($specific) {
+            $stmt->bindValue(':specific', $specific, PDO::PARAM_INT);
+        } elseif (!self::verifyPermission($db, 'user_view_others')) {
+            $stmt->bindValue(':userid', $userid, PDO::PARAM_INT);
+        }
+
+        $stmt->execute();
+        return (int) $stmt->fetchColumn();
     }
 
     /**
@@ -518,55 +659,203 @@ class UserManager
      * @param $db
      * @param $ldap_use
      * @param int|null $specific User ID (optional)
+     * @param int|null $limit Number of records to return (optional)
+     * @param int|null $offset Starting offset (optional)
      *
      * @return array array of user details
      */
-    public static function get_user_detail_list($db, $ldap_use, ?int $specific = null): array
+    public static function getUserDetailList($db, $ldap_use, ?int $specific = null, ?int $limit = null, ?int $offset = null): array
     {
-        $userid = $_SESSION ['userid'];
+        $userid = $_SESSION['userid'];
 
         if ($specific) {
-            $sql_add = "AND users.id = " . $db->quote($specific, 'integer');
-        } elseif (self::verify_permission($db, 'user_view_others')) {
+            $sql_add = "AND users.id = :specific";
+        } elseif (self::verifyPermission($db, 'user_view_others')) {
             $sql_add = "";
         } else {
-            $sql_add = "AND users.id = " . $db->quote($userid, 'integer');
+            $sql_add = "AND users.id = :userid";
         }
 
         $query = "SELECT users.id AS uid,
-			username,
-			fullname,
-			email,
-			description AS descr,
-			active,";
+        username,
+        fullname,
+        email,
+        description AS descr,
+        active,
+        auth_method,";
+
         if ($ldap_use) {
             $query .= "use_ldap,";
         }
 
+        // Restrict the join to user-type templates so users pointed at a deleted
+        // template or a group template are surfaced with a NULL tpl_id and routed
+        // through the broken-row fallback below.
         $query .= "perm_templ.id AS tpl_id,
-			perm_templ.name AS tpl_name,
-			perm_templ.descr AS tpl_descr
-			FROM users, perm_templ
-			WHERE users.perm_templ = perm_templ.id " . $sql_add . "
-			ORDER BY username";
+        perm_templ.name AS tpl_name,
+        perm_templ.descr AS tpl_descr
+        FROM users
+        LEFT JOIN perm_templ ON users.perm_templ = perm_templ.id
+             AND perm_templ.template_type = 'user'
+        WHERE 1=1 " . $sql_add . "
+        ORDER BY username";
 
-        $response = $db->query($query);
+        if ($limit !== null) {
+            $query .= " LIMIT :limit OFFSET :offset";
+        }
 
-        while ($user = $response->fetch()) {
-            $userlist [] = array(
-                "uid" => $user ['uid'],
-                "username" => $user ['username'],
-                "fullname" => $user ['fullname'],
-                "email" => $user ['email'],
-                "descr" => $user ['descr'],
-                "active" => $user ['active'],
+        $stmt = $db->prepare($query);
+
+        if ($specific) {
+            $stmt->bindValue(':specific', $specific, PDO::PARAM_INT);
+        } elseif (!self::verifyPermission($db, 'user_view_others')) {
+            $stmt->bindValue(':userid', $userid, PDO::PARAM_INT);
+        }
+
+        if ($limit !== null) {
+            $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+            $stmt->bindValue(':offset', $offset ?? 0, PDO::PARAM_INT);
+        }
+
+        $stmt->execute();
+        $response = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        // Fetch user groups in a separate query
+        $userGroups = self::getUserGroupsMap($db);
+
+        // Fetch MFA status in a separate query
+        $mfaStatus = self::getUserMfaStatusMap($db);
+
+        // Resolve the fallback template only when at least one row has a dangling perm_templ.
+        // Using the minimum-permission user template keeps the dropdown's <option selected>
+        // pointing somewhere safe: a stale save lands on minimum permissions rather than
+        // letting the browser auto-pick the first <option> (which is typically Administrator).
+        $fallbackTplId = null;
+        $fallbackTplName = null;
+        foreach ($response as $user) {
+            if ($user['tpl_id'] === null) {
+                $fallbackTplId = self::getMinimalPermissionTemplateId($db, 'user');
+                if ($fallbackTplId !== null) {
+                    $fallbackTplName = self::getPermissionTemplateName($db, $fallbackTplId);
+                }
+                break;
+            }
+        }
+
+        $userList = array();
+        foreach ($response as $user) {
+            $tplId = $user['tpl_id'];
+            $tplName = $user['tpl_name'];
+            $tplDescr = $user['tpl_descr'];
+            if ($tplId === null && $fallbackTplId !== null) {
+                $tplId = $fallbackTplId;
+                $tplName = $fallbackTplName;
+                $tplDescr = null;
+            }
+
+            $userList[] = array(
+                "uid" => $user['uid'],
+                "username" => $user['username'],
+                "fullname" => $user['fullname'],
+                "email" => $user['email'],
+                "descr" => $user['descr'],
+                "active" => $user['active'],
                 "use_ldap" => $user['use_ldap'] ?? 0,
-                "tpl_id" => $user ['tpl_id'],
-                "tpl_name" => $user ['tpl_name'],
-                "tpl_descr" => $user ['tpl_descr']
+                "auth_type" => $user['auth_method'] ?? 'sql',
+                "tpl_id" => $tplId,
+                "tpl_name" => $tplName,
+                "tpl_descr" => $tplDescr,
+                "groups" => $userGroups[$user['uid']] ?? [],
+                "mfa_enabled" => $mfaStatus[$user['uid']] ?? false
             );
         }
-        return $userlist;
+        return $userList;
+    }
+
+    /**
+     * Resolve auth_method value, preserving external auth types (oidc, saml).
+     *
+     * @param bool $useLdap Whether LDAP is being enabled
+     * @param string|null $currentAuthMethod Current auth_method from the database
+     * @return string The resolved auth_method value
+     */
+    private static function resolveAuthMethod(bool $useLdap, ?string $currentAuthMethod): string
+    {
+        if ($useLdap) {
+            return 'ldap';
+        }
+
+        if (in_array($currentAuthMethod, ['oidc', 'saml'])) {
+            return $currentAuthMethod;
+        }
+
+        return 'sql';
+    }
+
+    /**
+     * Look up a permission template's display name by ID
+     */
+    private static function getPermissionTemplateName($db, int $templId): ?string
+    {
+        $stmt = $db->prepare("SELECT name FROM perm_templ WHERE id = :id");
+        $stmt->execute([':id' => $templId]);
+        $name = $stmt->fetchColumn();
+        return $name === false ? null : (string)$name;
+    }
+
+    /**
+     * Get a map of user IDs to their group names
+     *
+     * @param object $db Database connection
+     * @return array Map of user_id => array of group names
+     */
+    private static function getUserGroupsMap($db): array
+    {
+        $query = "SELECT ugm.user_id, ug.name AS group_name
+                  FROM user_group_members ugm
+                  INNER JOIN user_groups ug ON ugm.group_id = ug.id
+                  ORDER BY ugm.user_id, ug.name";
+
+        $stmt = $db->prepare($query);
+        $stmt->execute();
+        $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        $userGroups = [];
+        foreach ($results as $row) {
+            $userId = $row['user_id'];
+            if (!isset($userGroups[$userId])) {
+                $userGroups[$userId] = [];
+            }
+            $userGroups[$userId][] = $row['group_name'];
+        }
+
+        return $userGroups;
+    }
+
+    /**
+     * Get a map of user IDs to their MFA enabled status
+     *
+     * @param object $db Database connection
+     * @return array Map of user_id => bool (true if MFA enabled)
+     */
+    private static function getUserMfaStatusMap($db): array
+    {
+        try {
+            $query = "SELECT user_id, enabled FROM user_mfa WHERE enabled = 1";
+            $stmt = $db->prepare($query);
+            $stmt->execute();
+            $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            $mfaStatus = [];
+            foreach ($results as $row) {
+                $mfaStatus[$row['user_id']] = true;
+            }
+
+            return $mfaStatus;
+        } catch (\PDOException $e) {
+            // Table might not exist if MFA was never enabled
+            return [];
+        }
     }
 
     /**
@@ -582,21 +871,28 @@ class UserManager
      *
      * @return array array of permissions [id,name,descr] or permission names [name]
      */
-    public static function get_permissions_by_template_id($db, int $templ_id = 0, bool $return_name_only = false): array
+    public static function getPermissionsByTemplateId($db, int $templ_id = 0, bool $return_name_only = false): array
     {
         $limit = '';
         if ($templ_id > 0) {
-            $limit = ", perm_templ_items
-			WHERE perm_templ_items.templ_id = " . $db->quote($templ_id, 'integer') . "
-			AND perm_templ_items.perm_id = perm_items.id";
-        }
-
-        $query = "SELECT perm_items.id AS id,
+            $query = "SELECT perm_items.id AS id,
 			perm_items.name AS name,
 			perm_items.descr AS descr
-			FROM perm_items" . $limit . "
+			FROM perm_items, perm_templ_items
+			WHERE perm_templ_items.templ_id = :templ_id
+			AND perm_templ_items.perm_id = perm_items.id
 			ORDER BY name";
-        $response = $db->query($query);
+            $stmt = $db->prepare($query);
+            $stmt->execute([':templ_id' => $templ_id]);
+            $response = $stmt;
+        } else {
+            $query = "SELECT perm_items.id AS id,
+			perm_items.name AS name,
+			perm_items.descr AS descr
+			FROM perm_items
+			ORDER BY name";
+            $response = $db->query($query);
+        }
 
         $permission_list = array();
         while ($permission = $response->fetch()) {
@@ -620,20 +916,17 @@ class UserManager
      *
      * @return boolean true on success, false otherwise
      */
-    public function update_user_details(array $details): bool
+    public function updateUserDetails(array $details): bool
     {
-        $perm_edit_own = self::verify_permission($this->db, 'user_edit_own');
-        $perm_edit_others = self::verify_permission($this->db, 'user_edit_others');
-        $perm_templ_perm_edit = self::verify_permission($this->db, 'templ_perm_edit');
-        $perm_is_godlike = self::verify_permission($this->db, 'user_is_ueberuser');
+        $perm_edit_own = self::verifyPermission($this->db, 'user_edit_own');
+        $perm_edit_others = self::verifyPermission($this->db, 'user_edit_others');
+        $perm_templ_perm_edit = self::verifyPermission($this->db, 'templ_perm_edit');
+        $perm_is_godlike = self::verifyPermission($this->db, 'user_is_ueberuser');
 
-        if (($details['uid'] == $_SESSION ["userid"] && $perm_edit_own) || ($details['uid'] != $_SESSION ["userid"] && $perm_edit_others)) {
-
+        if (($details['uid'] == $_SESSION["userid"] && $perm_edit_own) || ($details['uid'] != $_SESSION["userid"] && $perm_edit_others)) {
             $validation = new Validator($this->db, $this->config);
-            if (!$validation->is_valid_email($details['email'])) {
-                $error = new ErrorMessage(_('Enter a valid email address.'));
-                $errorPresenter = new ErrorPresenter();
-                $errorPresenter->present($error);
+            if (!$validation->isValidEmail($details['email'])) {
+                $this->messageService->addSystemError(_('Enter a valid email address.'));
 
                 return false;
             }
@@ -658,7 +951,7 @@ class UserManager
             // current username is not the same as the username that was given by the
             // user, the username should apparently be changed. If so, check if the "new"
             // username already exists.
-            $query = "SELECT username FROM users WHERE id = :id";
+            $query = "SELECT username, auth_method FROM users WHERE id = :id";
             $stmt = $this->db->prepare($query);
             $stmt->bindParam(':id', $details['uid'], PDO::PARAM_INT);
             $stmt->execute();
@@ -668,12 +961,11 @@ class UserManager
                 // Username of user ID in the database is different from the name
                 // we have been given. User wants a change of username. Now, make
                 // sure it doesn't already exist.
-                $query = "SELECT id FROM users WHERE username = " . $this->db->quote($details['username'], 'text');
-                $response = $this->db->queryOne($query);
+                $stmt = $this->db->prepare("SELECT id FROM users WHERE username = :username");
+                $stmt->execute([':username' => $details['username']]);
+                $response = $stmt->fetchColumn();
                 if ($response) {
-                    $error = new ErrorMessage(_('Username exist already, please choose another one.'));
-                    $errorPresenter = new ErrorPresenter();
-                    $errorPresenter->present($error);
+                    $this->messageService->addSystemError(_('Username exist already, please choose another one.'));
 
                     return false;
                 }
@@ -689,20 +981,22 @@ class UserManager
 
             // If the user is allowed to change the permission template, set it.
             if ($perm_templ_perm_edit == "1") {
-                $query .= ", perm_templ = :templ_id";
+                $query .= ", perm_templ = :templ_id, perm_templ_source = 'admin'";
             }
 
             // If the user is allowed to change the use_ldap flag, set it.
             if ($perm_is_godlike == "1") {
-                $query .= ", use_ldap = :use_ldap";
+                $query .= ", use_ldap = :use_ldap, auth_method = :auth_method";
             }
 
-            $passwd_edit_others_perm = self::verify_permission($this->db, 'user_passwd_edit_others');
+            $passwd_edit_others_perm = self::verifyPermission($this->db, 'user_passwd_edit_others');
+            $hashedPassword = null;
             if (isset($details['password']) && $details['password'] != "" && $passwd_edit_others_perm) {
-                $config = new AppConfiguration();
+                $config = ConfigurationManager::getInstance();
+                $config->initialize();
                 $userAuthService = new UserAuthenticationService(
-                    $config->get('password_encryption'),
-                    $config->get('password_encryption_cost')
+                    $config->get('security', 'password_encryption', 'bcrypt'),
+                    $config->get('security', 'password_cost', 12)
                 );
                 $hashedPassword = $userAuthService->hashPassword($details['password']);
                 $query .= ", password = :password";
@@ -722,6 +1016,8 @@ class UserManager
             }
             if ($perm_is_godlike == "1") {
                 $stmt->bindValue(':use_ldap', $use_ldap, PDO::PARAM_INT);
+
+                $stmt->bindValue(':auth_method', self::resolveAuthMethod((bool) $use_ldap, $userCheck['auth_method'] ?? null), PDO::PARAM_STR);
             }
             if (isset($details['password']) && $details['password'] != "" && $passwd_edit_others_perm) {
                 $stmt->bindValue(':password', $hashedPassword, PDO::PARAM_STR);
@@ -731,9 +1027,7 @@ class UserManager
 
             $stmt->execute();
         } else {
-            $error = new ErrorMessage(_("You do not have the permission to edit this user."));
-            $errorPresenter = new ErrorPresenter();
-            $errorPresenter->present($error);
+            $this->messageService->addSystemError(_("You do not have the permission to edit this user."));
 
             return false;
         }
@@ -745,67 +1039,149 @@ class UserManager
      *
      * @param array $details Array of User details
      *
-     * @return boolean true on success, false otherwise
+     * @return int|false The new user ID on success, false otherwise
      */
-    public function add_new_user(array $details): bool
+    public function addNewUser(array $details): int|false
     {
-        $ldap_use = $this->config->get('ldap_use');
+        $ldap_use = $this->config->get('ldap', 'enabled');
         $validation = new Validator($this->db, $this->config);
 
-        if (!self::verify_permission($this->db, 'user_add_new')) {
-            $error = new ErrorMessage(_("You do not have the permission to add a new user."));
-            $errorPresenter = new ErrorPresenter();
-            $errorPresenter->present($error);
+        if (!self::verifyPermission($this->db, 'user_add_new')) {
+            $this->messageService->addSystemError(_("You do not have the permission to add a new user."));
 
             return false;
-        } elseif (self::user_exists($this->db, $details['username'])) {
-            $error = new ErrorMessage(_('Username exist already, please choose another one.'));
-            $errorPresenter = new ErrorPresenter();
-            $errorPresenter->present($error);
+        } elseif (self::userExists($this->db, $details['username'])) {
+            $this->messageService->addSystemError(_('Username exist already, please choose another one.'));
 
             return false;
         } elseif ($details['username'] === '') {
-            $error = new ErrorMessage(_('Enter a valid user name.'));
-            $errorPresenter = new ErrorPresenter();
-            $errorPresenter->present($error);
+            $this->messageService->addSystemError(_('Enter a valid user name.'));
 
             return false;
-        } elseif (!$validation->is_valid_email($details['email'])) {
-            $error = new ErrorMessage(_('Enter a valid email address.'));
-            $errorPresenter = new ErrorPresenter();
-            $errorPresenter->present($error);
+        } elseif (!$validation->isValidEmail($details['email'])) {
+            $this->messageService->addSystemError(_('Enter a valid email address.'));
 
             return false;
-        } elseif ($details['active'] == 1) {
-            $active = 1;
-        } else {
-            $active = 0;
         }
 
-        if ($ldap_use && $details['use_ldap'] == 1) {
+        // Set active status (defaults to 0 if not set)
+        $active = isset($details['active']) && $details['active'] == 1 ? 1 : 0;
+
+        if ($ldap_use && isset($details['use_ldap']) && $details['use_ldap'] == 1) {
             $use_ldap = 1;
+            $auth_method = 'ldap';
             $password_hash = 'LDAP_USER';
         } else {
             $use_ldap = 0;
-            $config = new AppConfiguration();
+            $auth_method = 'sql';
+            $config = ConfigurationManager::getInstance();
+            $config->initialize();
             $userAuthService = new UserAuthenticationService(
-                $config->get('password_encryption'),
-                $config->get('password_encryption_cost')
+                $config->get('security', 'password_encryption'),
+                $config->get('security', 'password_cost')
             );
             $password_hash = $userAuthService->hashPassword($details['password']);
         }
 
-        $query = "INSERT INTO users (username, password, fullname, email, description, perm_templ, active, use_ldap) VALUES (" . $this->db->quote($details['username'], 'text') . ", " . $this->db->quote($password_hash, 'text') . ", " . $this->db->quote($details['fullname'], 'text') . ", " . $this->db->quote($details['email'], 'text') . ", " . $this->db->quote($details['descr'], 'text') . ", ";
+        $query = "INSERT INTO users (username, password, fullname, email, description, perm_templ, active, use_ldap, auth_method) VALUES (:username, :password, :fullname, :email, :description, :perm_templ, :active, :use_ldap, :auth_method)";
 
-        if (self::verify_permission($this->db, 'user_edit_templ_perm')) {
-            $query .= $this->db->quote($details['perm_templ'], 'integer') . ", ";
+        $stmt = $this->db->prepare($query);
+        $stmt->bindValue(':username', $details['username']);
+        $stmt->bindValue(':password', $password_hash);
+        $stmt->bindValue(':fullname', $details['fullname'] ?? '');
+        $stmt->bindValue(':email', $details['email']);
+        $stmt->bindValue(':description', $details['descr'] ?? '');
+
+        if (self::verifyPermission($this->db, 'user_edit_templ_perm')) {
+            $stmt->bindValue(':perm_templ', $details['perm_templ'], PDO::PARAM_INT);
         } else {
-            $current_user = self::get_user_detail_list($this->db, $ldap_use, $_SESSION['userid']);
-            $query .= $this->db->quote($current_user[0]['tpl_id'], 'integer') . ", ";
+            $current_user = self::getUserDetailList($this->db, $ldap_use, $_SESSION['userid']);
+            $stmt->bindValue(':perm_templ', $current_user[0]['tpl_id'], PDO::PARAM_INT);
         }
-        $query .= $this->db->quote($active, 'integer') . ", " . $this->db->quote($use_ldap, 'integer') . ")";
-        $this->db->query($query);
 
-        return true;
+        $stmt->bindValue(':active', $active, PDO::PARAM_INT);
+        $stmt->bindValue(':use_ldap', $use_ldap, PDO::PARAM_INT);
+        $stmt->bindValue(':auth_method', $auth_method);
+        $stmt->execute();
+
+        return (int)$this->db->lastInsertId();
+    }
+
+    /**
+     * Check if user can perform a specific action on a zone using hybrid permissions
+     *
+     * This method validates both ownership (direct or via group) AND that the user's
+     * permission template (or group's template) grants the required permission.
+     *
+     * @param PDO $db Database connection
+     * @param int $userId User ID
+     * @param int $domainId Domain/Zone ID
+     * @param string $permissionName Permission name (e.g., 'zone_content_edit_own')
+     * @return bool True if user has the permission for this zone
+     */
+    public static function canUserPerformZoneAction($db, int $userId, int $domainId, string $permissionName): bool
+    {
+        // Check if user is überuser - they have all permissions
+        if (self::isUserSuperuser($db, $userId)) {
+            return true;
+        }
+
+        // Use HybridPermissionService for granular permission checking
+        static $hybridPermissionService = null;
+        if ($hybridPermissionService === null) {
+            $groupRepository = new DbUserGroupRepository($db);
+            $memberRepository = new DbUserGroupMemberRepository($db);
+
+            $hybridPermissionService = new HybridPermissionService(
+                $db,
+                $groupRepository,
+                $memberRepository
+            );
+        }
+
+        return $hybridPermissionService->canUserPerformAction($userId, $domainId, $permissionName);
+    }
+
+    /**
+     * Get all permissions a user has for a specific zone
+     *
+     * Returns an array with permissions from all sources (direct ownership + group memberships).
+     * Useful for debugging and displaying effective permissions in the UI.
+     *
+     * @param PDO $db Database connection
+     * @param int $userId User ID
+     * @param int $domainId Domain/Zone ID
+     * @return array{permissions: string[], sources: array} Permissions and their sources
+     */
+    public static function getUserZonePermissions($db, int $userId, int $domainId): array
+    {
+        // Check if user is überuser
+        if (self::isUserSuperuser($db, $userId)) {
+            return [
+                'permissions' => ['user_is_ueberuser'], // All permissions implied
+                'sources' => [
+                    [
+                        'type' => 'überuser',
+                        'id' => $userId,
+                        'permissions' => ['user_is_ueberuser']
+                    ]
+                ]
+            ];
+        }
+
+        // Use HybridPermissionService
+        static $hybridPermissionService = null;
+        if ($hybridPermissionService === null) {
+            $groupRepository = new DbUserGroupRepository($db);
+            $memberRepository = new DbUserGroupMemberRepository($db);
+
+            $hybridPermissionService = new HybridPermissionService(
+                $db,
+                $groupRepository,
+                $memberRepository
+            );
+        }
+
+        return $hybridPermissionService->getUserPermissionsForZone($userId, $domainId);
     }
 }

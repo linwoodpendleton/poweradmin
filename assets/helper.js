@@ -2,7 +2,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -36,14 +36,75 @@ function toggleZoneCheckboxes() {
     }
 }
 
-function zone_sort_by(sortbytype) {
-    document.search_form.zone_sort_by.value = sortbytype;
-    document.getElementsByName("do_search")[0].click();
+function toggleRecordCheckboxes() {
+    const select_state = document.getElementById("select_records");
+    const checkboxes = document.getElementsByName("record_id[]");
+    for (let index = 0; index < checkboxes.length; index++) {
+        checkboxes[index].checked = select_state.checked;
+    }
+    updateDeleteButtonState("delete-records-button", checkboxes);
 }
 
-function record_sort_by(sortbytype) {
-    document.search_form.record_sort_by.value = sortbytype;
-    document.getElementsByName("do_search")[0].click();
+function toggleEditRecordCheckboxes() {
+    const select_state = document.getElementById("select_edit_records");
+    const checkboxes = document.getElementsByName("record_id[]");
+    for (let index = 0; index < checkboxes.length; index++) {
+        checkboxes[index].checked = select_state.checked;
+    }
+    updateDeleteButtonState("delete-selected-records", checkboxes);
+}
+
+function updateDeleteButtonState(buttonId, checkboxes) {
+    const deleteButton = document.getElementById(buttonId);
+    if (!deleteButton) return;
+    
+    let hasChecked = false;
+    for (let i = 0; i < checkboxes.length; i++) {
+        if (checkboxes[i].checked) {
+            hasChecked = true;
+            break;
+        }
+    }
+    deleteButton.disabled = !hasChecked;
+}
+
+function toggleSearchZoneCheckboxes() {
+    const select_state = document.getElementById("select_search_zones");
+    const checkboxes = document.getElementsByName("zone_id[]");
+    for (let index = 0; index < checkboxes.length; index++) {
+        checkboxes[index].checked = select_state.checked;
+    }
+    updateDeleteButtonState("delete-zones-button", checkboxes);
+}
+
+function zone_sort_by(column) {
+    const form = document.search_form;
+    const currentSortBy = form.zone_sort_by.value;
+    const currentSortDirection = form.zone_sort_by_direction.value;
+
+    if (currentSortBy === column) {
+        form.zone_sort_by_direction.value = currentSortDirection === 'ASC' ? 'DESC' : 'ASC';
+    } else {
+        form.zone_sort_by.value = column;
+        form.zone_sort_by_direction.value = 'ASC';
+    }
+
+    form.submit();
+}
+
+function record_sort_by(column) {
+    const form = document.search_form;
+    const currentSortBy = form.record_sort_by.value;
+    const currentSortDirection = form.record_sort_by_direction.value;
+
+    if (currentSortBy === column) {
+        form.record_sort_by_direction.value = currentSortDirection === 'ASC' ? 'DESC' : 'ASC';
+    } else {
+        form.record_sort_by.value = column;
+        form.record_sort_by_direction.value = 'ASC';
+    }
+
+    form.submit();
 }
 
 function do_search_with_zones_page(zones_page) {
@@ -54,6 +115,44 @@ function do_search_with_zones_page(zones_page) {
 function do_search_with_records_page(records_page) {
     document.search_form.records_page.value = records_page;
     document.getElementsByName("do_search")[0].click();
+}
+
+function do_search_with_zones_rows_per_page(rowsPerPage) {
+    // Save setting and get value
+    rowsPerPage = changeRowsPerPage(rowsPerPage, 'search_zones');
+    
+    // Update the form's hidden input for rows_per_page
+    const form = document.search_form;
+    form.zones_rows_per_page.value = rowsPerPage;
+    
+    // Reset pagination to first page
+    form.zones_page.value = 1;
+    
+    // Submit the form to refresh results
+    if (typeof form.submit === 'function') {
+        form.submit();
+    } else {
+        document.getElementsByName("do_search")[0].click();
+    }
+}
+
+function do_search_with_records_rows_per_page(rowsPerPage) {
+    // Save setting and get value
+    rowsPerPage = changeRowsPerPage(rowsPerPage, 'search_records');
+    
+    // Update the form's hidden input for rows_per_page
+    const form = document.search_form;
+    form.records_rows_per_page.value = rowsPerPage;
+    
+    // Reset pagination to first page
+    form.records_page.value = 1;
+    
+    // Submit the form to refresh results
+    if (typeof form.submit === 'function') {
+        form.submit();
+    } else {
+        document.getElementsByName("do_search")[0].click();
+    }
 }
 
 const queryState = (() => {

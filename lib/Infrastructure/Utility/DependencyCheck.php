@@ -1,9 +1,10 @@
 <?php
+
 /*  Poweradmin, a friendly web-based admin tool for PowerDNS.
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -29,7 +30,7 @@ class DependencyCheck
     /**
      * Associative array of required PHP extensions and their representative functions.
      */
-    const DEPENDENCIES = array(
+    private const DEPENDENCIES = array(
         'intl' => 'idn_to_utf8',
         'gettext' => 'gettext',
         'openssl' => 'openssl_encrypt',

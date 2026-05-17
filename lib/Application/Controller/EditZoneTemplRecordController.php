@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -25,39 +25,59 @@
  *
  * @package     Poweradmin
  * @copyright   2007-2010 Rejo Zenger <rejo@zenger.nl>
- * @copyright   2010-2024 Poweradmin Development Team
+ * @copyright   2010-2025 Poweradmin Development Team
  * @license     https://opensource.org/licenses/GPL-3.0 GPL
  */
 
 namespace Poweradmin\Application\Controller;
 
 use Poweradmin\BaseController;
-use Poweradmin\Domain\Model\RecordType;
 use Poweradmin\Domain\Model\UserManager;
 use Poweradmin\Domain\Model\ZoneTemplate;
-use Valitron;
+use Poweradmin\Domain\Service\RecordTypeService;
+use Poweradmin\Domain\Service\UserContextService;
+use Poweradmin\Domain\Service\ZoneTemplateSyncService;
+use Symfony\Component\Validator\Constraints as Assert;
 
 class EditZoneTemplRecordController extends BaseController
 {
+    private RecordTypeService $recordTypeService;
+    private UserContextService $userContext;
+
+    public function __construct(array $request)
+    {
+        parent::__construct($request);
+        $this->recordTypeService = new RecordTypeService($this->getConfig());
+        $this->userContext = new UserContextService();
+    }
 
     public function run(): void
     {
-        $v = new Valitron\Validator($_GET);
-        $v->rules([
-            'required' => ['id', 'zone_templ_id'],
-            'integer' => ['id', 'zone_templ_id'],
-        ]);
-        if (!$v->validate()) {
-            $this->showFirstError($v->errors());
+        $constraints = [
+            'id' => [
+                new Assert\NotBlank(),
+                new Assert\Type('numeric')
+            ],
+            'template_id' => [
+                new Assert\NotBlank(),
+                new Assert\Type('numeric')
+            ]
+        ];
+
+        $this->setValidationConstraints($constraints);
+
+        if (!$this->doValidateRequest($this->requestData)) {
+            $this->showFirstValidationError($this->requestData);
         }
 
-        $record_id = htmlspecialchars($_GET['id']);
-        $zone_templ_id = htmlspecialchars($_GET['zone_templ_id']);
+        $record_id = (int)$this->getSafeRequestValue('id');
+        $zone_templ_id = (int)$this->getSafeRequestValue('template_id');
 
-        $owner = ZoneTemplate::get_zone_templ_is_owner($this->db, $zone_templ_id, $_SESSION['userid']);
-        $perm_godlike = UserManager::verify_permission($this->db, 'user_is_ueberuser');
-        $perm_master_add = UserManager::verify_permission($this->db, 'zone_master_add');
-        $this->checkCondition(!($perm_godlike || $perm_master_add && $owner), _("You do not have the permission to delete zone templates."));
+        $userId = $this->userContext->getLoggedInUserId();
+        $owner = ZoneTemplate::getZoneTemplIsOwner($this->db, $zone_templ_id, $userId);
+        $perm_godlike = UserManager::verifyPermission($this->db, 'user_is_ueberuser');
+        $perm_templ_edit = UserManager::verifyPermission($this->db, 'zone_templ_edit');
+        $this->checkCondition(!($perm_godlike || $perm_templ_edit && $owner), _("You do not have the permission to edit zone template records."));
 
         if ($this->isPost()) {
             $this->validateCsrfToken();
@@ -67,24 +87,63 @@ class EditZoneTemplRecordController extends BaseController
         $this->showZoneTemplateRecordForm($record_id, $zone_templ_id);
     }
 
-    public function showZoneTemplateRecordForm(string $record_id, string $zone_templ_id): void
+    public function showZoneTemplateRecordForm(int $record_id, int $zone_templ_id): void
     {
-        $record = ZoneTemplate::get_zone_templ_record_from_id($this->db, $record_id);
+        $record = ZoneTemplate::getZoneTemplRecordFromId($this->db, $record_id);
+
+        // Get count of zones using this template
+        $zoneTemplate = new ZoneTemplate($this->db, $this->getConfig(), $this->createDnsBackendProvider());
+        $userId = $this->userContext->getLoggedInUserId();
+        $linked_zones = $zoneTemplate->getListZoneUseTempl($zone_templ_id, $userId);
+        $zones_linked_count = count($linked_zones);
 
         $this->render('edit_zone_templ_record.html', [
             'record' => $record,
             'zone_templ_id' => $zone_templ_id,
             'record_id' => $record_id,
-            'templ_details' => ZoneTemplate::get_zone_templ_details($this->db, $zone_templ_id),
-            'record_types' => RecordType::getTypes(),
+            'templ_details' => ZoneTemplate::getZoneTemplDetails($this->db, $zone_templ_id),
+            'record_types' => $this->recordTypeService->getAllTypes($this->getPdnsCapabilities()),
+            'zones_linked_count' => $zones_linked_count,
         ]);
     }
 
-    public function updateZoneTemplateRecord(string $zone_templ_id): void
+    public function updateZoneTemplateRecord(int $zone_templ_id): void
     {
-        if (ZoneTemplate::edit_zone_templ_record($this->db, $_POST)) {
+        $constraints = [
+            'name' => [
+                new Assert\NotBlank()
+            ],
+            'type' => [
+                new Assert\NotBlank()
+            ],
+            'content' => [
+                new Assert\NotBlank()
+            ],
+            'ttl' => [
+                new Assert\NotBlank(),
+                new Assert\Type('numeric')
+            ],
+            'prio' => [
+                new Assert\Type('numeric')
+            ]
+        ];
+
+        $this->setValidationConstraints($constraints);
+
+        if (!$this->doValidateRequest($_POST)) {
+            $this->showFirstValidationError($_POST);
+            return;
+        }
+
+        $template = new ZoneTemplate($this->db, $this->getConfig(), $this->createDnsBackendProvider());
+
+        if ($template->editZoneTemplRecord($_POST)) {
+            // Mark template as modified to track sync status
+            $syncService = new ZoneTemplateSyncService($this->db, $this->getConfig(), $this->createDnsBackendProvider());
+            $syncService->markTemplateAsModified($zone_templ_id);
+
             $this->setMessage('edit_zone_templ', 'success', _('Zone template has been updated successfully.'));
-            $this->redirect('index.php', ['page'=> 'edit_zone_templ', 'id' => $zone_templ_id]);
+            $this->redirect('/zones/templates/' . $zone_templ_id . '/edit');
         }
     }
 }

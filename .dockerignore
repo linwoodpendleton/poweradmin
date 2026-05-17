@@ -1,7 +1,12 @@
+# Poweradmin related files
+addons/
+install/
+
 # Version Control
 .gitignore
 .git
 .github
+.gitattributes
 
 # IDE
 nbproject
@@ -24,27 +29,47 @@ Dockerfile
 # phpDocumentor
 docs
 .phive
-tools
 
 # Misc
 **/.DS_Store
 .devcontainer
-phpdoc.dist.xml
 scripts
 transifex.yml
-*.md
+# Keep README.md but exclude other markdown files
+DONORS.md
 
 # Node.js
 package.json
 node_modules/
+.nvmrc
 
 # Logs
 logs
 *.log
 npm-debug.log*
 
-# Cypress
-cypress/
-cypress.config.js
-cypress/videos
-cypress/screenshots
+# Playwright E2E tests
+playwright/
+playwright.config.js
+playwright-report/
+test-results/
+*.trace.zip
+
+# Configuration files
+composer.json
+composer.lock
+phpcs.xml
+phpdoc.dist.xml
+phpmd.xml
+phpstan.neon
+phpunit.xml.dist
+psalm-baseline.xml
+psalm.xml
+.php-cs-fixer.cache
+.php-cs-fixer.php
+.phan
+nginx.conf.example
+.htaccess
+.hadolint.yaml
+transifex.yml
+cliff.toml

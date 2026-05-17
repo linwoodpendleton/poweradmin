@@ -1,0 +1,60 @@
+# Issue auto-labeling configuration
+# Automatically applies labels to issues based on keywords in title and body
+# Uses regex patterns - case insensitive matching
+#
+# NOTE: bug/feature types are handled by GitHub's built-in issue types
+# (set via `type:` field in issue templates), not by labels.
+
+# === Authentication & Security ===
+auth:
+  - '(authentication|log\s?in|log\s?out|session\smanagement|mfa|2fa|two.factor|ldap\s|saml\s|oidc\s|oauth\s|sso\s|sign.in|credentials|password\s(reset|change|policy))'
+
+security:
+  - '(security|vulnerability|vulnerabilities|xss|sql.injection|csrf|exploit|cve-\d|penetration|breach|malicious|attack)'
+
+# === DNS Core ===
+dns:
+  - '(dns\s|zone\s(?!template)|record\s(?!template)|nameserver|ns\srecord|a\srecord|aaaa\srecord|cname\srecord|mx\srecord|txt\srecord|srv\srecord|ptr\srecord|soa\srecord)'
+
+dnssec:
+  - '(dnssec|ds\srecord|dnskey|nsec3?|rrsig|key.signing|zone.signing)'
+
+dns-templates:
+  - '(zone.template|record.template|template.zone|template.record|default.record)'
+
+# === API ===
+api:
+  - '(rest\sapi|api\sendpoint|/api/v|json\sresponse|swagger|openapi|api.key|api.authentication)'
+
+# === User Interface ===
+ui:
+  - '(user.interface|\bui\b|frontend|css\s|stylesheet|javascript|layout|responsive|form.field|modal|dialog|dropdown)'
+
+ui-templates:
+  - '(twig\s|\.twig\b|theme\s|template.file|rendering|partial)'
+
+# === Core Functionality ===
+core:
+  - '(user.management|permission.template|role.assignment|access.control|überuser|supermaster|supermasteraccount)'
+
+validation:
+  - '(validation|validator|invalid.input|input.validation|form.validation|data.validation|constraint)'
+
+# === Infrastructure ===
+infra:
+  - '(docker|container|dockerfile|deployment|nginx|apache|caddy|frankenphp|ci/cd|github.actions|\.yml\sworkflow)'
+
+installer:
+  - '(install(ation)?\s(wizard|process|step|page|screen|guide)|setup.wizard|first.time.setup|getting.started|install\.php|initial.config)'
+
+# === Internationalization ===
+i18n:
+  - '(translation|locale|language.support|i18n|internationalization|gettext|transifex|\.po\b|\.mo\b|localization)'
+
+# === Documentation ===
+docs:
+  - '(documentation|readme\.md|user.guide|tutorial|wiki\s|changelog|contributing\.md)'
+
+# === Dependencies ===
+dependencies:
+  - '(dependency|dependencies|composer\.(json|lock)|npm|package\.json|library.update|vendor)'

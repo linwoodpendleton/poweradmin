@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -22,19 +22,27 @@
 
 namespace Poweradmin\Application\Query;
 
-use Poweradmin\AppConfiguration;
+use Poweradmin\Domain\Service\DnsIdnService;
+use Poweradmin\Domain\Service\DnsValidation\IPAddressValidator;
+use Poweradmin\Domain\Service\UserContextService;
+use Poweradmin\Infrastructure\Configuration\ConfigurationInterface;
+use Poweradmin\Infrastructure\Database\DbCompat;
 
 abstract class BaseSearch
 {
     protected object $db;
     protected string $db_type;
-    protected AppConfiguration $config;
+    protected ConfigurationInterface $config;
+    protected IPAddressValidator $ipValidator;
+    protected UserContextService $userContext;
 
-    public function __construct($db, $config, string $db_type)
+    public function __construct($db, $config, string $db_type, ?IPAddressValidator $ipValidator = null, ?UserContextService $userContext = null)
     {
         $this->db = $db;
         $this->config = $config;
         $this->db_type = $db_type;
+        $this->ipValidator = $ipValidator ?? new IPAddressValidator();
+        $this->userContext = $userContext ?? new UserContextService();
     }
 
     /**
@@ -51,9 +59,9 @@ abstract class BaseSearch
         $reverse_search_string = '';
 
         if ($parameters['reverse']) {
-            if (filter_var($parameters['query'], FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+            if ($this->ipValidator->isValidIPv4($parameters['query'])) {
                 $reverse_search_string = implode('.', array_reverse(explode('.', $parameters['query'])));
-            } elseif (filter_var($parameters['query'], FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+            } elseif ($this->ipValidator->isValidIPv6($parameters['query'])) {
                 $reverse_search_string = unpack('H*hex', inet_pton($parameters['query']));
                 $reverse_search_string = implode('.', array_reverse(str_split($reverse_search_string['hex'])));
             } else {
@@ -63,7 +71,11 @@ abstract class BaseSearch
             $reverse_search_string = '%' . $reverse_search_string . '%';
         }
 
-        $needle = idn_to_ascii(trim($parameters['query']), IDNA_NONTRANSITIONAL_TO_ASCII);
+        if (isset($parameters['comments']) && $parameters['comments']) {
+            $parameters['wildcard'] = true;
+        }
+
+        $needle = DnsIdnService::toPunycode(trim($parameters['query']));
         $search_string = ($parameters['wildcard'] ? '%' : '') . $needle . ($parameters['wildcard'] ? '%' : '');
         return array($reverse_search_string, $parameters, $search_string);
     }
@@ -75,19 +87,7 @@ abstract class BaseSearch
      */
     protected function handleSqlMode(): string
     {
-        $originalSqlMode = '';
-
-        if ($this->db_type === 'mysql') {
-            $originalSqlMode = $this->db->queryOne("SELECT @@GLOBAL.sql_mode");
-
-            if (str_contains($originalSqlMode, 'ONLY_FULL_GROUP_BY')) {
-                $newSqlMode = str_replace('ONLY_FULL_GROUP_BY,', '', $originalSqlMode);
-                $this->db->exec("SET SESSION sql_mode = '$newSqlMode'");
-            } else {
-                $originalSqlMode = '';
-            }
-        }
-        return $originalSqlMode;
+        return DbCompat::handleSqlMode($this->db, $this->db_type);
     }
 
     /**
@@ -98,8 +98,6 @@ abstract class BaseSearch
      */
     protected function restoreSqlMode(string $originalSqlMode): void
     {
-        if ($this->db_type === 'mysql' && $originalSqlMode !== '') {
-            $this->db->exec("SET SESSION sql_mode = '$originalSqlMode'");
-        }
+        DbCompat::restoreSqlMode($this->db, $this->db_type, $originalSqlMode);
     }
 }

@@ -1,0 +1,1184 @@
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="{{ base_url_prefix }}/">{% trans %}Home{% endtrans %}</a></li>
+        <li class="breadcrumb-item">
+            {% if is_reverse_zone %}
+            <a href="{{ base_url_prefix }}/zones/reverse">{% trans %}Reverse Zones{% endtrans %}</a>
+            {% else %}
+            <a href="{{ base_url_prefix }}/zones/forward">{% trans %}Forward Zones{% endtrans %}</a>
+            {% endif %}
+        </li>
+        <li class="breadcrumb-item">
+            {% if idn_zone_name %}
+            {{ idn_zone_name }}
+            {% else %}
+            {{ zone_name_to_display }}
+            {% endif %}
+        </li>
+        <li class="breadcrumb-item" aria-current="page">{% trans %}Edit{% endtrans %}</li>
+    </ol>
+</nav>
+
+{% if (perm_edit == "all" or (perm_edit == "own" or perm_edit == "own_as_client") and user_is_zone_owner == "1") and domain_type != "SLAVE" and iface_edit_add_record_top and iface_show_add_record_form %}
+<div class="card shadow-sm mb-4">
+    <div class="card-header py-3 d-flex justify-content-between align-items-center">
+        <strong><i class="bi bi-plus-circle me-2"></i>{% trans %}Add new record{% endtrans %}</strong>
+        <div>
+            {% if dns_wizard_actions is defined and dns_wizard_actions|length > 0 and not is_reverse_zone %}
+            {% for action in dns_wizard_actions %}
+            <a href="{{ base_url_prefix }}{{ action.url }}" class="btn btn-primary btn-sm me-1" title="{% trans %}Guided wizards for DMARC, SPF, DKIM, CAA, TLSA, and SRV records{% endtrans %}">
+                <i class="bi bi-{{ action.icon }} me-1 text-white"></i>{{ action.label|trans }}
+            </a>
+            {% endfor %}
+            {% endif %}
+            <a href="{{ base_url_prefix }}/zones/{{ zone_id }}/records/add" class="btn btn-primary btn-sm me-1">
+                <i class="bi bi-table me-1 text-white"></i>{% trans %}Multi-record mode{% endtrans %}
+            </a>
+            <a href="{{ base_url_prefix }}/zones/{{ zone_id }}/records/bulk" class="btn btn-secondary btn-sm">
+                <i class="bi bi-file-earmark-text me-1 text-white"></i>{% trans %}Bulk add{% endtrans %}
+            </a>
+        </div>
+    </div>
+    <div class="card-body">
+        {% if form_data and form_data.error %}
+        <div class="alert alert-danger py-2 small">
+            <i class="bi bi-exclamation-triangle-fill me-1"></i>
+            {% if form_data.errorMessage is defined %}
+                {{ form_data.errorMessage }}
+            {% elseif form_data.multi_record_error %}
+                {% if form_data.failure_count > 0 %}
+                    {% trans %}Failed to add {% endtrans %}{{ form_data.failure_count }} {% trans %}record(s). Please check the record format.{% endtrans %}
+                {% else %}
+                    {% trans %}Failed to add records. Please check the record format.{% endtrans %}
+                {% endif %}
+            {% elseif form_data.content %}
+                {% trans %}Content validation failed:{% endtrans %} {% trans %}Invalid value for record type{% endtrans %} {{ form_data.type }}.
+            {% else %}
+                {% trans %}Please provide all required information.{% endtrans %}
+            {% endif %}
+        </div>
+        {% endif %}
+        <form class="{{ form_data and form_data.error ? 'was-validated' : 'needs-validation' }}" method="post" action="{{ base_url_prefix }}/zones/{{ zone_id }}/edit" novalidate>
+            <input type="hidden" name="_token" value="{{ csrf_token }}">
+            <input type="hidden" name="domain" value="{{ zone_id }}">
+            <input type="hidden" name="form_token" value="{{ form_token }}">
+            <table class="table table-striped table-hover table-sm add-record-form">
+                <tr>
+                    <th>
+                        {% trans %}Name{% endtrans %}
+                    </th>
+                    <th>{% trans %}Type{% endtrans %}</th>
+                    <th>{% trans %}Content{% endtrans %}</th>
+                    <th>{% trans %}Priority{% endtrans %}</th>
+                    <th>{% trans %}TTL{% endtrans %}</th>
+                    {% if iface_record_comments %}
+                        <th>{% trans %}Comment{% endtrans %}</th>
+                    {% endif %}
+                    <th class="text-center">
+                        {% if not is_reverse_zone and iface_add_reverse_record %}
+                            {% trans %}Add PTR{% endtrans %}
+                        {% endif %}
+                        {% if is_reverse_zone and iface_add_domain_record %}
+                            {% trans %}Add A/AAAA{% endtrans %}
+                        {% endif %}
+                    </th>
+                    <th></th>
+                </tr>
+                <tr>
+                    <td class="col-sm-2">
+                        <input class="form-control form-control-sm {% if form_data.fieldError is defined and (form_data.fieldError == 'name' or form_data.fieldError == 'name-content-duplicate') %}is-invalid{% endif %}" 
+                               type="text" name="name" value="{{ form_data.name|default('') }}" 
+                               placeholder="">
+                        {% if form_data.fieldError is defined and form_data.fieldError == 'name' %}
+                        <div class="invalid-feedback">{% trans %}Invalid hostname format{% endtrans %}</div>
+                        {% endif %}
+                    </td>
+                    <td class="col-sm-2">
+                        <select id="recordTypeSelectTop" class="form-select form-select-sm" name="type" onchange="updateContentInput('recordTypeSelectTop', 'contentInputContainerTop', 'recordContentTop'); updatePriorityFieldState(this, 'priorityFieldTop');" {% if form_data.type %}data-preselect="{{ form_data.type }}"{% endif %}>
+                            {% set rev = false %}
+                            {% for record_type in record_types %}
+                            {% set add = "" %}
+                            {% if is_reverse_zone and record_type == "PTR" %}
+                            {% set add = "SELECTED" %}
+                            {% endif %}
+
+                            {% if iface_add_reverse_record and record_type == "A" %}
+                            {% set add = "SELECTED" %}
+                            {% set rev = true %}
+                            {% endif %}
+                            <option {{ add }} value="{{ record_type }}">{{ record_type }}</option>
+                            {% endfor %}
+                        </select>
+                    </td>
+                    <td>
+                        <div id="contentInputContainerTop">
+                            <input id="recordContentTop" class="form-control form-control-sm {% if form_data.fieldError is defined and (form_data.fieldError == 'content' or form_data.fieldError == 'name-content-duplicate') %}is-invalid{% endif %}" 
+                                   type="text" name="content" value="{{ form_data.content|default('') }}" required>
+                        </div>
+                        {% if form_data.fieldError is defined and form_data.fieldError == 'content' %}
+                        <div class="invalid-feedback">{{ form_data.errorMessage }}</div>
+                        {% elseif form_data.fieldError is defined and form_data.fieldError == 'name-content-duplicate' %}
+                        <div class="invalid-feedback">{% trans %}This record already exists{% endtrans %}</div>
+                        {% else %}
+                        <div class="invalid-feedback">{% trans %}Provide content{% endtrans %}</div>
+                        {% endif %}
+                        <div id="cnameRootWarningTop" class="alert alert-warning mt-1 py-1 px-2 small" style="display: none;">
+                            <i class="bi bi-exclamation-triangle-fill me-1"></i>{% trans %}Warning: CNAME records at the domain root (zone apex) are not recommended and may cause issues. SOA and NS records are required at the domain root and cannot coexist with CNAME.{% endtrans %}
+                        </div>
+                    </td>
+                    <td class="col-sm-1">
+                        <input id="priorityFieldTop" class="form-control form-control-sm {% if form_data.fieldError is defined and form_data.fieldError == 'prio' %}is-invalid{% endif %}" 
+                               type="number" name="prio" value="{{ form_data.prio|default('0') }}" min="0" max="65535" pattern="[0-9]*">
+                        {% if form_data.fieldError is defined and form_data.fieldError == 'prio' %}
+                        <div class="invalid-feedback">{% trans %}Invalid priority{% endtrans %}</div>
+                        {% endif %}
+                    </td>
+                    <td class="col-sm-1">
+                        <input class="form-control form-control-sm {% if form_data.fieldError is defined and form_data.fieldError == 'ttl' %}is-invalid{% endif %}" 
+                               type="number" name="ttl" min="0" max="2147483647" pattern="[0-9]*" value="{{ form_data.ttl|default(dns_ttl) }}" required>
+                        {% if form_data.fieldError is defined and form_data.fieldError == 'ttl' %}
+                        <div class="invalid-feedback">{% trans %}Invalid TTL value{% endtrans %}</div>
+                        {% else %}
+                        <div class="invalid-feedback">{% trans %}Provide TTL{% endtrans %}</div>
+                        {% endif %}
+                    </td>
+                    {% if iface_record_comments %}
+                    <td><input class="form-control form-control-sm" type="text" name="comment" value="{{ form_data.comment|default('') }}"></td>
+                    {% endif %}
+                    <td class="col-sm-1 text-center">
+                        {% if not is_reverse_zone and iface_add_reverse_record %}
+                        <span class="align-middle">
+                            <input class="form-check-input" type="checkbox" name="reverse">
+                        </span>
+                        {% endif %}
+                        {% if is_reverse_zone and iface_add_domain_record %}
+                        <span class="align-middle">
+                            <input class="form-check-input" type="checkbox" name="create_domain_record">
+                        </span>
+                        {% endif %}
+                    </td>
+                    <td class="col-sm-1">
+                        <input class="btn btn-primary btn-sm" type="submit" name="commit"
+                            value="{% trans %}Add record{% endtrans %}">
+                    </td>
+                </tr>
+            </table>
+            {% if not is_reverse_zone %}
+            <small class="text-muted d-block mt-2">
+                <i class="bi bi-info-circle"></i> 
+                {% trans %}Tip: Enter just the hostname (e.g. 'www') and the zone name will be added automatically. Use '@' for the zone apex/root.{% endtrans %}
+            </small>
+            {% endif %}
+        </form>
+    </div>
+</div>
+{% endif %}
+
+<div class="card shadow-sm mb-4">
+    <div class="card-header py-3 d-flex justify-content-between align-items-center">
+        <strong>
+            <i class="bi bi-pencil-square me-2"></i>
+            {% if idn_zone_name %}
+            {% trans %}Edit zone{% endtrans %} "{{ idn_zone_name }}" ({{ zone_name_to_display }})
+            {% else %}
+            {% trans %}Edit zone{% endtrans %} "{{ zone_name_to_display }}"
+            {% endif %}
+        </strong>
+        <div>
+            {% if perm_edit != "none" and iface_edit_save_changes_top %}
+            <button class="btn btn-primary btn-sm" type="submit" form="edit-zone-form" name="commit">
+                <i class="bi bi-check-circle me-1 text-white"></i>{% trans %}Save changes{% endtrans %}
+            </button>
+            <button class="btn btn-secondary btn-sm" type="reset" form="edit-zone-form" name="reset">
+                <i class="bi bi-arrow-counterclockwise me-1 text-white"></i>{% trans %}Reset{% endtrans %}
+            </button>
+            {% endif %}
+            {% if not iface_show_add_record_form and (perm_edit == "all" or (perm_edit == "own" or perm_edit == "own_as_client") and user_is_zone_owner == "1") and domain_type != "SLAVE" %}
+            <a href="{{ base_url_prefix }}/zones/{{ zone_id }}/records/add" class="btn btn-primary btn-sm">
+                <i class="bi bi-plus-circle me-1 text-white"></i>{% trans %}Add record{% endtrans %}
+            </a>
+            <a href="index.php?page=geo_routing&id={{ zone_id }}" class="btn btn-info btn-sm">
+                <i class="bi bi-globe me-1 text-white"></i>{% trans %}GeoIP routing{% endtrans %}
+            </a>
+            {% endif %}
+            {% if dns_wizard_actions is defined and dns_wizard_actions|length > 0 and not is_reverse_zone and (perm_edit == "all" or (perm_edit == "own" or perm_edit == "own_as_client") and user_is_zone_owner == "1") and domain_type != "SLAVE" %}
+            {% for action in dns_wizard_actions %}
+            <a href="{{ base_url_prefix }}{{ action.url }}" class="btn btn-primary btn-sm" title="{% trans %}Guided wizards for DMARC, SPF, DKIM, CAA, TLSA, and SRV records{% endtrans %}">
+                <i class="bi bi-{{ action.icon }} me-1 text-white"></i>{{ action.label|trans }}
+            </a>
+            {% endfor %}
+            {% endif %}
+            {% if whois_actions is defined and whois_actions|length > 0 %}
+            {% for action in whois_actions %}
+            <a href="{{ base_url_prefix }}{{ action.url }}" class="btn btn-secondary btn-sm">
+                <i class="bi bi-{{ action.icon }} me-1 text-white"></i>{{ action.label }}
+            </a>
+            {% endfor %}
+            {% endif %}
+            {% if rdap_actions is defined and rdap_actions|length > 0 %}
+            {% for action in rdap_actions %}
+            <a href="{{ base_url_prefix }}{{ action.url }}" class="btn btn-secondary btn-sm">
+                <i class="bi bi-{{ action.icon }} me-1 text-white"></i>{{ action.label }}
+            </a>
+            {% endfor %}
+            {% endif %}
+            <a href="{{ base_url_prefix }}/zones/{{ zone_id }}/ownership" class="btn btn-secondary btn-sm">
+                <i class="bi bi-people me-1 text-white"></i>{% trans %}Ownership{% endtrans %}
+            </a>
+            {% if meta_edit or perm_view != "none" %}
+            <a href="{{ base_url_prefix }}/zones/{{ zone_id }}/metadata" class="btn btn-secondary btn-sm">
+                <i class="bi bi-database-gear me-1 text-white"></i>{% if meta_edit %}{% trans %}Metadata{% endtrans %}{% else %}{% trans %}View Metadata{% endtrans %}{% endif %}
+            </a>
+            {% endif %}
+            {% if dblog_use and (perm_is_godlike or perm_view_zone_own or perm_view_zone_other) %}
+            <a href="{{ base_url_prefix }}/zones/logs?zone_id={{ zone_id }}" class="btn btn-secondary btn-sm">
+                <i class="bi bi-journal-text me-1 text-white"></i>{% trans %}Logs{% endtrans %}
+            </a>
+            {% endif %}
+            {% if (perm_zone_templ_add or perm_is_godlike) and domain_type != "SLAVE" %}
+            <a href="{{ base_url_prefix }}/zones/{{ zone_id }}/save-template" class="btn btn-outline-secondary btn-sm">
+                <i class="bi bi-save me-1 text-secondary"></i>{% trans %}Save as Template{% endtrans %}
+            </a>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="card-body">
+        {% if not records %}
+            {% if search_term or record_type_filter or content_filter %}
+                <div class="d-flex align-items-center py-2 px-3 bg-light border rounded mb-3">
+                    <i class="bi bi-info-circle me-2 text-info"></i>
+                    <small>{% trans %}No records match your filter criteria.{% endtrans %}</small>
+                    <a href="{{ base_url_prefix }}/zones/{{ zone_id }}/edit" class="btn btn-outline-secondary btn-sm ms-auto">
+                        <i class="bi bi-x-circle me-1 text-secondary"></i>{% trans %}Clear{% endtrans %}
+                    </a>
+                </div>
+            {% else %}
+                <div class="alert alert-info py-2 small">
+                    <i class="bi bi-info-circle me-2"></i>
+                    {% trans %}This zone does not have any records.{% endtrans %}
+                </div>
+            {% endif %}
+        {% else %}
+
+        <!-- Record filtering section (single line) -->
+        <div class="mb-3">
+            <form id="record-filter-form" method="get" action="{{ base_url_prefix }}/zones/{{ zone_id }}/edit">
+                
+                <div class="d-flex align-items-center py-2 px-3 {% if search_term or record_type_filter or content_filter %}border-primary{% endif %} border rounded">
+                    <div class="me-2">
+                        <i class="bi bi-funnel{% if search_term or record_type_filter or content_filter %}-fill text-primary{% endif %} me-1"></i>
+                        <strong>{% trans %}Filter:{% endtrans %}</strong>
+                    </div>
+                    
+                    <!-- Search term (filters name or content) -->
+                    <div class="me-2" style="min-width: 220px;">
+                        <input type="text" class="form-control form-control-sm {% if search_term %}border-primary{% endif %}" id="search" name="search" 
+                               value="{{ search_term }}" placeholder="{% trans %}Search by name or content{% endtrans %}">
+                    </div>
+                    
+                    <!-- Record type filter -->
+                    <div class="me-2" style="min-width: 140px;">
+                        <select class="form-select form-select-sm {% if record_type_filter %}border-primary{% endif %}" id="record_type" name="record_type">
+                            <option value="">{% trans %}All Types{% endtrans %}</option>
+                            {% for record_type in record_types %}
+                            <option value="{{ record_type }}" {{ record_type_filter == record_type ? 'selected' : '' }}>{{ record_type }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    
+                    <!-- Content filter -->
+                    <div class="me-2" style="min-width: 180px;">
+                        <input type="text" class="form-control form-control-sm {% if content_filter %}border-primary{% endif %}" id="content" name="content" 
+                               value="{{ content_filter }}" placeholder="{% trans %}Filter by content{% endtrans %}">
+                    </div>
+                    
+                    <!-- Filter buttons -->
+                    <div class="ms-auto">
+                        <button type="submit" class="btn btn-primary btn-sm me-1">
+                            <i class="bi bi-funnel-fill me-1 text-white"></i>{% trans %}Apply{% endtrans %}
+                        </button>
+                        {% if search_term or record_type_filter or content_filter %}
+                            <a href="{{ base_url_prefix }}/zones/{{ zone_id }}/edit" class="btn btn-outline-primary btn-sm">
+                                <i class="bi bi-x-circle me-1 text-primary"></i>{% trans %}Clear{% endtrans %}
+                            </a>
+                        {% else %}
+                            <a href="{{ base_url_prefix }}/zones/{{ zone_id }}/edit" class="btn btn-outline-secondary btn-sm disabled">
+                                <i class="bi bi-x-circle me-1 text-secondary"></i>{% trans %}Clear{% endtrans %}
+                            </a>
+                        {% endif %}
+                    </div>
+                </div>
+            </form>
+        </div>
+
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <div>
+                {{ pagination | raw }}
+            </div>
+            <div class="d-flex align-items-center">
+                <label for="rows-per-page" class="me-2 text-secondary small">{% trans %}Rows per page:{% endtrans %}</label>
+                <select id="rows-per-page" class="form-select form-select-sm" style="width: auto;" onchange="changeRowsPerPage(this.value)">
+                    <option value="10" {{ row_amount == 10 ? 'selected' : '' }}>10</option>
+                    <option value="20" {{ row_amount == 20 ? 'selected' : '' }}>20</option>
+                    <option value="50" {{ row_amount == 50 ? 'selected' : '' }}>50</option>
+                    <option value="100" {{ row_amount == 100 ? 'selected' : '' }}>100</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Records info section -->
+        {% if filtered_record_count != record_count %}
+        <div class="mb-3">
+            <span class="small text-muted">
+                <i class="bi bi-info-circle me-1"></i>
+                {% trans %}Showing{% endtrans %} {{ filtered_record_count }} {% trans %}of{% endtrans %} {{ record_count }} {% trans %}total records{% endtrans %}
+            </span>
+        </div>
+        {% endif %}
+
+        <form id="edit-zone-form" class="needs-validation" method="post" action="" novalidate>
+            <input type="hidden" name="_token" value="{{ csrf_token }}">
+            <input type="hidden" name="serial" value="{{ serial }}">
+
+            <div class="table-responsive">
+                <table class="table table-striped table-hover table-sm add-record-form">
+                    <thead class="table-light">
+                    <tr>
+                        <th class="text-center" style="width: 40px;">
+                            <input type="checkbox" class="form-check-input" id="select_edit_records" onClick="toggleEditRecordCheckboxes()">
+                        </th>
+                        {% if iface_edit_show_id %}
+                        <th>
+                            <a href="{{ base_url_prefix }}/zones/{{ zone_id }}/edit?record_sort_by=id&sort_direction={{ record_sort_by == 'id' and sort_direction == 'ASC' ? 'DESC' : 'ASC' }}">
+                                {% trans %}Id{% endtrans %}
+                            </a>
+                            {% if record_sort_by == 'id' %}
+                                <i class="bi bi-arrow-{{ sort_direction == 'ASC' ? 'down' : 'up' }}"></i>
+                            {% endif %}
+                        </th>
+                        {% endif %}
+                        <th>
+                            <a href="{{ base_url_prefix }}/zones/{{ zone_id }}/edit?record_sort_by=name&sort_direction={{ record_sort_by == 'name' and sort_direction == 'ASC' ? 'DESC' : 'ASC' }}">
+                                {% trans %}Name{% endtrans %}
+                            </a>
+                            {% if record_sort_by == 'name' %}
+                                <i class="bi bi-arrow-{{ sort_direction == 'ASC' ? 'down' : 'up' }}"></i>
+                            {% endif %}
+                        </th>
+                        <th>
+                            <a href="{{ base_url_prefix }}/zones/{{ zone_id }}/edit?record_sort_by=type&sort_direction={{ record_sort_by == 'type' and sort_direction == 'ASC' ? 'DESC' : 'ASC' }}">
+                                {% trans %}Type{% endtrans %}
+                            </a>
+                            {% if record_sort_by == 'type' %}
+                                <i class="bi bi-arrow-{{ sort_direction == 'ASC' ? 'down' : 'up' }}"></i>
+                            {% endif %}
+                        </th>
+                        <th>
+                            <a href="{{ base_url_prefix }}/zones/{{ zone_id }}/edit?record_sort_by=content&sort_direction={{ record_sort_by == 'content' and sort_direction == 'ASC' ? 'DESC' : 'ASC' }}">
+                                {% trans %}Content{% endtrans %}
+                            </a>
+                            {% if record_sort_by == 'content' %}
+                                <i class="bi bi-arrow-{{ sort_direction == 'ASC' ? 'down' : 'up' }}"></i>
+                            {% endif %}
+                        </th>
+                        <th>
+                            <a href="{{ base_url_prefix }}/zones/{{ zone_id }}/edit?record_sort_by=prio&sort_direction={{ record_sort_by == 'prio' and sort_direction == 'ASC' ? 'DESC' : 'ASC' }}">
+                                {% trans %}Priority{% endtrans %}
+                            </a>
+                            {% if record_sort_by == 'prio' %}
+                                <i class="bi bi-arrow-{{ sort_direction == 'ASC' ? 'down' : 'up' }}"></i>
+                            {% endif %}
+                        </th>
+                        <th>
+                            <a href="{{ base_url_prefix }}/zones/{{ zone_id }}/edit?record_sort_by=ttl&sort_direction={{ record_sort_by == 'ttl' and sort_direction == 'ASC' ? 'DESC' : 'ASC' }}">
+                                {% trans %}TTL{% endtrans %}
+                            </a>
+                            {% if record_sort_by == 'ttl' %}
+                                <i class="bi bi-arrow-{{ sort_direction == 'ASC' ? 'down' : 'up' }}"></i>
+                            {% endif %}
+                        </th>
+                        {% if iface_record_comments %}
+                        <th>{% trans %}Comment{% endtrans %}</th>
+                        {% endif %}
+                        <th>
+                            <a href="{{ base_url_prefix }}/zones/{{ zone_id }}/edit?record_sort_by=disabled&sort_direction={{ record_sort_by == 'disabled' and sort_direction == 'ASC' ? 'DESC' : 'ASC' }}">
+                                {% trans %}Disabled{% endtrans %}
+                            </a>
+                            {% if record_sort_by == 'disabled' %}
+                                <i class="bi bi-arrow-{{ sort_direction == 'ASC' ? 'down' : 'up' }}"></i>
+                            {% endif %}
+                        </th>
+                        {% if pdns_caps and pdns_caps.supportsRecordTimestamps %}
+                        <th>{% trans %}Last modified{% endtrans %}</th>
+                        {% endif %}
+                        {% if iface_show_record_edit_button or iface_show_record_delete_button %}
+                        <th class="text-center" style="width: 100px;">{% trans %}Actions{% endtrans %}</th>
+                        {% endif %}
+                    </tr>
+                    </thead>
+                    <tbody>
+        {% for r in records %}
+        {% set record_locked = (r['type'] == "SOA" and perm_edit != "all") or (r['type'] == "NS" and perm_edit == "own_as_client") %}
+
+        {% if not record_locked %}
+        <input type="hidden" name="record[{{ r['id'] }}][rid]" value="{{ r['id'] }}">
+        <input type="hidden" name="record[{{ r['id'] }}][zid]" value="{{ zone_id }}">
+        {% endif %}
+        <tr style="font-size: 14px;">
+            <td class="text-center">
+                {% if not record_locked %}
+                <input class="form-check-input" type="checkbox" name="record_id[]" value="{{ r['id'] }}" onclick="updateRecordSelectionButtons()">
+                {% endif %}
+            </td>
+            {% if iface_edit_show_id %}
+            <td>{{ r['id'] }}</td>
+            {% endif %}
+            {% if record_locked %}
+            <td class="col-sm-2">{{ r['display_name'] is defined ? r['display_name'] : r['name'] }}</td>
+            <td class="text-center"><span class="badge {{ record_type_class(r['type']) }}">{{ r['type'] }}</span></td>
+            <td>{{ r['content'] }}</td>
+            <td>-</td>
+            <td class="col-sm-1">{{ r['ttl'] }}</td>
+            {% if iface_record_comments %}
+            <td>{{ r['comment'] ?? '-' }}</td>
+            {% endif %}
+            <td class="text-center">{% if r['disabled'] %}{% trans %}Yes{% endtrans %}{% else %}{% trans %}No{% endtrans %}{% endif %}</td>
+            {% if pdns_caps and pdns_caps.supportsRecordTimestamps %}
+            <td class="small text-muted text-nowrap">
+                {% if r['modified_at'] %}
+                    <span title="{{ r['modified_at']|date('Y-m-d H:i:s T') }}">{{ r['modified_at']|date('Y-m-d H:i') }}</span>
+                {% else %}
+                    <span class="text-muted">&mdash;</span>
+                {% endif %}
+            </td>
+            {% endif %}
+            {% else %}
+            <td class="col-sm-2"><input class="form-control form-control-sm" type="text"
+                                        name="record[{{ r['id'] }}][name]" value="{{ r['editable_name'] is defined ? r['editable_name'] : r['name'] }}"></td>
+            <td class="text-center">
+                <input type="hidden" name="record[{{ r['id'] }}][type]" value="{{ r['type'] }}">
+                <span class="badge {{ record_type_class(r['type']) }}">{{ r['type'] }}</span>
+            </td>
+            <td>
+                <div id="contentInputContainer{{ r['id'] }}">
+                    <input id="recordContent{{ r['id'] }}" class="form-control form-control-sm" type="text" name="record[{{ r['id'] }}][content]" value="{{ r['content'] }}">
+                </div>
+            </td>
+            <td><input class="form-control form-control-sm record-priority-field" type="number"
+                                        id="priority_field_{{ r['id'] }}" name="record[{{ r['id'] }}][prio]"
+                                        data-record-type="{{ r['type'] }}"
+                                        min="0" max="65535" pattern="[0-9]*" value="{{ r['prio'] }}"></td>
+            <td class="col-sm-1"><input class="form-control form-control-sm" type="text"
+                                        min="0" max="2147483647" pattern="[0-9]*" name="record[{{ r['id'] }}][ttl]"
+                                        value="{{ r['ttl'] }}"></td>
+            {% if iface_record_comments %}
+            <td class="col-sm-3"><input class="form-control form-control-sm" type="text" name="record[{{ r['id'] }}][comment]"
+                       value="{{ r['comment'] }}"></td>
+            {% endif %}
+            <td class="text-center">
+                <input class="form-check-input" type="checkbox" name="record[{{ r['id'] }}][disabled]" {% if r['disabled'] == 1 %}checked{% endif %}>
+            </td>
+            {% if pdns_caps and pdns_caps.supportsRecordTimestamps %}
+            <td class="small text-muted text-nowrap">
+                {% if r['modified_at'] %}
+                    <span title="{{ r['modified_at']|date('Y-m-d H:i:s T') }}">{{ r['modified_at']|date('Y-m-d H:i') }}</span>
+                {% else %}
+                    <span class="text-muted">&mdash;</span>
+                {% endif %}
+            </td>
+            {% endif %}
+            {% endif %}
+
+            {% if iface_show_record_edit_button or iface_show_record_delete_button %}
+                {% if domain_type == "SLAVE" or perm_edit == "none" or (perm_edit == "own" or perm_edit == "own_as_client") and user_is_zone_owner == "0" %}
+                <td>&nbsp;</td>
+                {% elseif r['type'] == "SOA" and perm_edit != "all" or r['type'] == "NS" and perm_edit == "own_as_client" %}
+                <td>&nbsp;</td>
+                {% else %}
+                <td class="text-center" style="width: 100px;">
+                    <div class="d-flex gap-1 justify-content-center">
+                        {% if iface_show_record_edit_button %}
+                        <a class="btn btn-outline-primary btn-sm" href="{{ base_url_prefix }}/zones/{{ zone_id }}/records/{{ r['id'] }}/edit">
+                            <i class="bi bi-pencil-square text-primary"></i></a>
+                        {% endif %}
+                        {% if iface_show_record_delete_button %}
+                        <a class="btn btn-outline-danger btn-sm" href="{{ base_url_prefix }}/zones/{{ zone_id }}/records/{{ r['id'] }}/delete">
+                            <i class="bi bi-trash text-danger"></i></a>
+                        {% endif %}
+                    </div>
+                </td>
+                {% endif %}
+            {% endif %}
+        </tr>
+        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <div>
+                    {{ pagination | raw }}
+                </div>
+                <div class="d-flex gap-2">
+                    {% if perm_edit != "none" and domain_type != "SLAVE" and (perm_edit == "all" or (perm_edit == "own" or perm_edit == "own_as_client") and user_is_zone_owner == "1") %}
+                        {% if not iface_show_record_edit_button %}
+                        <button type="button" class="btn btn-primary btn-sm" id="edit-selected-record" disabled onclick="editSelectedRecord()">
+                            <i class="bi bi-pencil-square me-1 text-white"></i>{% trans %}Edit selected{% endtrans %}
+                        </button>
+                        {% endif %}
+                        <button type="submit" form="delete-records-form" class="btn btn-danger btn-sm" id="delete-selected-records" disabled>
+                            <i class="bi bi-trash me-1 text-white"></i>{% trans %}Delete record(s){% endtrans %}
+                        </button>
+                    {% endif %}
+                </div>
+            </div>
+
+            {% if iface_zone_comments %}
+            <div class="mt-3 mb-3">
+                <label class="form-label"><strong>{% trans %}Comments{% endtrans %}:</strong></label>
+                <div class="d-flex gap-2 align-items-start">
+                    <textarea class="form-control form-control-sm" rows="5" name="zone_comment">{{ zone_comment }}</textarea>
+                    {% if perm_edit != "none" %}
+                    <a class="btn btn-outline-primary btn-sm" href="{{ base_url_prefix }}/zones/{{ zone_id }}/comment/edit">
+                        <i class="bi bi-pencil-square text-primary"></i> {% trans %}Edit comment{% endtrans %}</a>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+
+    {% endif %}
+
+{% if perm_edit != "none" and not iface_edit_save_changes_top %}
+<div class="card-footer py-3 d-flex justify-content-between align-items-center">
+    <div>
+        <button class="btn btn-primary btn-sm" type="submit" name="commit">
+            <i class="bi bi-check-circle me-1 text-white"></i>{% trans %}Save changes{% endtrans %}
+        </button>
+        <button class="btn btn-secondary btn-sm" type="reset" name="reset">
+            <i class="bi bi-arrow-counterclockwise me-1 text-white"></i>{% trans %}Reset{% endtrans %}
+        </button>
+    </div>
+    {% if (perm_edit == "all" or (perm_edit == "own" or perm_edit == "own_as_client") and user_is_zone_owner == "1") and domain_type != "SLAVE" %}
+    <div class="d-flex gap-2">
+        <a href="{{ base_url_prefix }}/zones/{{ zone_id }}/records/bulk" class="btn btn-outline-primary btn-sm">
+            <i class="bi bi-file-earmark-text me-1 text-primary"></i>{% trans %}Bulk add{% endtrans %}
+        </a>
+        {% if import_enabled is defined and import_enabled %}
+        <a href="{{ base_url_prefix }}/tools/zone-import?zone_id={{ zone_id }}&amp;zone_name={{ zone_name }}" class="btn btn-outline-secondary btn-sm">
+            <i class="bi bi-upload me-1 text-secondary"></i>{% trans %}Import{% endtrans %}
+        </a>
+        {% endif %}
+        {% if export_formats is defined and export_formats|length > 0 %}
+        <div class="btn-group">
+            <button type="button" class="btn btn-outline-secondary btn-sm dropdown-toggle" data-bs-toggle="dropdown">
+                <i class="bi bi-download me-1 text-secondary"></i>{% trans %}Export{% endtrans %}
+            </button>
+            <ul class="dropdown-menu">
+                {% for format in export_formats %}
+                <li><a class="dropdown-item" href="{{ base_url_prefix }}{{ format.url }}"><i class="bi bi-{{ format.icon }} me-2"></i>{{ format.label }}</a></li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+        {% if not is_reverse_zone and perm_edit != "none" %}
+        <a href="{{ base_url_prefix }}/zones/batch-ptr?id={{ zone_id }}" class="btn btn-outline-secondary btn-sm">
+            <i class="bi bi-arrow-repeat me-1 text-secondary"></i>{% trans %}Generate PTR{% endtrans %}
+        </a>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+</form>
+
+<form id="delete-records-form" method="post" action="{{ base_url_prefix }}/zones/records/delete" style="display: none;">
+    <input type="hidden" name="_token" value="{{ csrf_token }}">
+    <input type="hidden" name="zone_id" value="{{ zone_id }}">
+    <div id="selected-records-container"></div>
+</form>
+</div>
+</div>
+
+{% if perm_edit == "all" or (perm_edit == "own" or perm_edit == "own_as_client") and user_is_zone_owner == "1" %}
+{% if domain_type != "SLAVE" and not iface_edit_add_record_top and iface_show_add_record_form %}
+<div class="card shadow-sm mb-4">
+    <div class="card-header py-3 d-flex justify-content-between align-items-center">
+        <strong><i class="bi bi-plus-circle me-2"></i>{% trans %}Add new record{% endtrans %}</strong>
+        <div>
+            {% if dns_wizard_actions is defined and dns_wizard_actions|length > 0 and not is_reverse_zone %}
+            {% for action in dns_wizard_actions %}
+            <a href="{{ base_url_prefix }}{{ action.url }}" class="btn btn-primary btn-sm me-1" title="{% trans %}Guided wizards for DMARC, SPF, DKIM, CAA, TLSA, and SRV records{% endtrans %}">
+                <i class="bi bi-{{ action.icon }} me-1 text-white"></i>{{ action.label|trans }}
+            </a>
+            {% endfor %}
+            {% endif %}
+            <a href="{{ base_url_prefix }}/zones/{{ zone_id }}/records/add" class="btn btn-primary btn-sm me-1">
+                <i class="bi bi-table me-1 text-white"></i>{% trans %}Multi-record mode{% endtrans %}
+            </a>
+            <a href="{{ base_url_prefix }}/zones/{{ zone_id }}/records/bulk" class="btn btn-secondary btn-sm">
+                <i class="bi bi-file-earmark-text me-1 text-white"></i>{% trans %}Bulk add{% endtrans %}
+            </a>
+        </div>
+    </div>
+    <div class="card-body">
+        {% if form_data and form_data.error %}
+        <div class="alert alert-danger py-2 small">
+            <i class="bi bi-exclamation-triangle-fill me-1"></i>
+            {% if form_data.errorMessage is defined %}
+                {{ form_data.errorMessage }}
+            {% elseif form_data.multi_record_error %}
+                {% if form_data.failure_count > 0 %}
+                    {% trans %}Failed to add {% endtrans %}{{ form_data.failure_count }} {% trans %}record(s). Please check the record format.{% endtrans %}
+                {% else %}
+                    {% trans %}Failed to add records. Please check the record format.{% endtrans %}
+                {% endif %}
+            {% elseif form_data.content %}
+                {% trans %}Content validation failed:{% endtrans %} {% trans %}Invalid value for record type{% endtrans %} {{ form_data.type }}.
+            {% else %}
+                {% trans %}Please provide all required information.{% endtrans %}
+            {% endif %}
+        </div>
+        {% endif %}
+        <form class="{{ form_data and form_data.error ? 'was-validated' : 'needs-validation' }}" method="post" action="{{ base_url_prefix }}/zones/{{ zone_id }}/edit" novalidate>
+            <input type="hidden" name="_token" value="{{ csrf_token }}">
+            <input type="hidden" name="domain" value="{{ zone_id }}">
+            <input type="hidden" name="form_token" value="{{ form_token }}">
+
+            <table class="table table-striped table-hover table-sm add-record-form">
+                <tr>
+                    <th>
+                        {% trans %}Name{% endtrans %}
+                    </th>
+                    <th>{% trans %}Type{% endtrans %}</th>
+                    <th>{% trans %}Content{% endtrans %}</th>
+                    <th>{% trans %}Priority{% endtrans %}</th>
+                    <th>{% trans %}TTL{% endtrans %}</th>
+                    {% if iface_record_comments %}
+                        <th>{% trans %}Comment{% endtrans %}</th>
+                    {% endif %}
+                    <th class="text-center">
+                        {% if not is_reverse_zone and iface_add_reverse_record %}
+                            {% trans %}Add PTR{% endtrans %}
+                        {% endif %}
+                        {% if is_reverse_zone and iface_add_domain_record %}
+                            {% trans %}Add A/AAAA{% endtrans %}
+                        {% endif %}
+                    </th>
+                    <th></th>
+                </tr>
+                <tr>
+                    <td class="col-sm-2">
+                        <input class="form-control form-control-sm {% if form_data.fieldError is defined and (form_data.fieldError == 'name' or form_data.fieldError == 'name-content-duplicate') %}is-invalid{% endif %}" 
+                               type="text" name="name" value="{{ form_data.name|default('') }}" data-testid="record-name-input"
+                               placeholder="">
+                        {% if form_data.fieldError is defined and form_data.fieldError == 'name' %}
+                        <div class="invalid-feedback">{% trans %}Invalid hostname format{% endtrans %}</div>
+                        {% endif %}
+                    </td>
+                    <td class="col-sm-2">
+                        <select id="recordTypeSelectBottom" class="form-select form-select-sm" name="type" onchange="updateContentInput('recordTypeSelectBottom', 'contentInputContainerBottom', 'recordContentBottom'); updatePriorityFieldState(this, 'priorityFieldBottom');" {% if form_data.type %}data-preselect="{{ form_data.type }}"{% endif %}>
+                            {% set rev = false %}
+                            {% for record_type in record_types %}
+                            {% set add = "" %}
+                            {% if is_reverse_zone and record_type == "PTR" %}
+                            {% set add = "SELECTED" %}
+                            {% endif %}
+
+                            {% if iface_add_reverse_record and record_type == "A" %}
+                            {% set add = "SELECTED" %}
+                            {% set rev = true %}
+                            {% endif %}
+                            <option {{ add }} value="{{ record_type }}">{{ record_type }}</option>
+                            {% endfor %}
+                        </select>
+                    </td>
+                    <td>
+                        <div id="contentInputContainerBottom">
+                            <input id="recordContentBottom" class="form-control form-control-sm {% if form_data.fieldError is defined and (form_data.fieldError == 'content' or form_data.fieldError == 'name-content-duplicate') %}is-invalid{% endif %}" 
+                                   type="text" name="content" value="{{ form_data.content|default('') }}" data-testid="record-content-input" required>
+                        </div>
+                        {% if form_data.fieldError is defined and form_data.fieldError == 'content' %}
+                        <div class="invalid-feedback">{{ form_data.errorMessage }}</div>
+                        {% elseif form_data.fieldError is defined and form_data.fieldError == 'name-content-duplicate' %}
+                        <div class="invalid-feedback">{% trans %}This record already exists{% endtrans %}</div>
+                        {% else %}
+                        <div class="invalid-feedback">{% trans %}Provide content{% endtrans %}</div>
+                        {% endif %}
+                        <div id="cnameRootWarningBottom" class="alert alert-warning mt-1 py-1 px-2 small" style="display: none;">
+                            <i class="bi bi-exclamation-triangle-fill me-1"></i>{% trans %}Warning: CNAME records at the domain root (zone apex) are not recommended and may cause issues. SOA and NS records are required at the domain root and cannot coexist with CNAME.{% endtrans %}
+                        </div>
+                    </td>
+                    <td class="col-sm-1">
+                        <input id="priorityFieldBottom" class="form-control form-control-sm {% if form_data.fieldError is defined and form_data.fieldError == 'prio' %}is-invalid{% endif %}" 
+                               type="number" name="prio" value="{{ form_data.prio|default('0') }}" min="0" max="65535" pattern="[0-9]*">
+                        {% if form_data.fieldError is defined and form_data.fieldError == 'prio' %}
+                        <div class="invalid-feedback">{% trans %}Invalid priority{% endtrans %}</div>
+                        {% endif %}
+                    </td>
+                    <td class="col-sm-1">
+                        <input class="form-control form-control-sm {% if form_data.fieldError is defined and form_data.fieldError == 'ttl' %}is-invalid{% endif %}" 
+                               type="number" name="ttl" min="0" max="2147483647" pattern="[0-9]*" value="{{ form_data.ttl|default(dns_ttl) }}" required>
+                        {% if form_data.fieldError is defined and form_data.fieldError == 'ttl' %}
+                        <div class="invalid-feedback">{% trans %}Invalid TTL value{% endtrans %}</div>
+                        {% else %}
+                        <div class="invalid-feedback">{% trans %}Provide TTL{% endtrans %}</div>
+                        {% endif %}
+                    </td>
+                    {% if iface_record_comments %}
+                        <td><input class="form-control form-control-sm" type="text" name="comment" value="{{ form_data.comment|default('') }}"></td>
+                    {% endif %}
+                    <td class="col-sm-1 text-center">
+                        {% if not is_reverse_zone and iface_add_reverse_record %}
+                        <span class="align-middle">
+                            <input class="form-check-input" type="checkbox" name="reverse" data-testid="add-reverse-record-checkbox">
+                        </span>
+                        {% endif %}
+                        {% if is_reverse_zone and iface_add_domain_record %}
+                        <span class="align-middle">
+                            <input class="form-check-input" type="checkbox" name="create_domain_record" data-testid="add-domain-record-checkbox">
+                        </span>
+                        {% endif %}
+                    </td>
+                    <td class="col-sm-1">
+                        <input class="btn btn-primary btn-sm" type="submit" name="commit" data-testid="add-record-button"
+                            value="{% trans %}Add record{% endtrans %}">
+                    </td>
+                </tr>
+            </table>
+            <small class="text-muted d-block mt-2">
+                <i class="bi bi-info-circle"></i> 
+                {% trans %}Tip: Enter just the hostname (e.g. 'www') and the zone name will be added automatically. Use '@' for the zone apex/root.{% endtrans %}
+            </small>
+        </form>
+</div>
+</div>
+{% endif %}
+
+{% endif %}
+
+<!-- Zone Configuration -->
+<div class="row">
+    <div class="col-12">
+        <div class="card shadow-sm mb-4">
+            <div class="card-header py-2 d-flex justify-content-between align-items-center" role="button" data-bs-toggle="collapse" data-bs-target="#zone-config-body" aria-expanded="false">
+                <strong><i class="bi bi-gear me-2"></i>{% trans %}Zone Configuration{% endtrans %}</strong>
+                <i class="bi bi-chevron-down collapse-icon-config small"></i>
+            </div>
+            <div class="collapse" id="zone-config-body">
+            <div class="card-body">
+                <div class="row">
+                    <!-- Zone Type -->
+                    <div class="col-md-4">
+                        <h6 class="text-muted mb-3">{% trans %}Type{% endtrans %}</h6>
+                        {% if meta_edit %}
+                        <form action="{{ base_url_prefix }}/zones/{{ zone_id }}/edit" method="post">
+                            <input type="hidden" name="_token" value="{{ csrf_token }}">
+                            <div class="input-group input-group-sm">
+                                <select class="form-select form-select-sm" name="newtype">
+                                    {% for type in zone_types %}
+                                    {% set add = '' %}
+                                    {% if type == domain_type %}
+                                    {% set add = "SELECTED" %}
+                                    {% endif %}
+                                    <option {{ add }} value="{{ type }}">{{ type | lower }}</option>
+                                    {% endfor %}
+                                </select>
+                                <button class="btn btn-outline-secondary btn-sm" type="submit" name="type_change">
+                                    <i class="bi bi-arrow-repeat text-secondary"></i> {% trans %}Change{% endtrans %}
+                                </button>
+                            </div>
+                        </form>
+                        {% else %}
+                        <p><span class="badge bg-secondary">{{ domain_type | lower }}</span></p>
+                        {% endif %}
+                    </div>
+
+                    <!-- Slave Master IP (only for SLAVE type) -->
+                    {% if domain_type == "SLAVE" %}
+                    <div class="col-md-4">
+                        <h6 class="text-muted mb-3">{% trans %}IP address of master NS{% endtrans %}</h6>
+                        {% if meta_edit %}
+                        <form action="{{ base_url_prefix }}/zones/{{ zone_id }}/edit" method="post">
+                            <input type="hidden" name="_token" value="{{ csrf_token }}">
+                            <div class="input-group input-group-sm">
+                                <input class="form-control form-control-sm" type="text" name="new_master" value="{{ slave_master }}">
+                                <button class="btn btn-outline-secondary btn-sm" type="submit" name="slave_master_change">
+                                    <i class="bi bi-arrow-repeat text-secondary"></i> {% trans %}Change{% endtrans %}
+                                </button>
+                            </div>
+                        </form>
+                        {% else %}
+                        <p><code>{{ slave_master }}</code></p>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+
+                    <!-- Template -->
+                    <div class="col-md-4">
+                        <h6 class="text-muted mb-3">{% trans %}Template{% endtrans %}</h6>
+                        {% if meta_edit %}
+                        <form action="{{ base_url_prefix }}/zones/{{ zone_id }}/edit" method="post">
+                            <input type="hidden" name="_token" value="{{ csrf_token }}">
+                            <input type="hidden" name="current_zone_template" value="{{ zone_template_id }}">
+                            <div class="input-group input-group-sm">
+                                <select class="form-select form-select-sm" name="zone_template">
+                                    <option value="none">none</option>
+                                    {% for zone_template in zone_templates %}
+                                    {% set add = '' %}
+                                    {% if zone_template['id'] == zone_template_id %}
+                                    {% set add = "SELECTED" %}
+                                    {% endif %}
+                                    <option {{ add }} value="{{ zone_template['id'] }}">{{ zone_template['name'] }}</option>
+                                    {% endfor %}
+                                </select>
+                                <button class="btn btn-outline-secondary btn-sm" type="submit" name="template_change">
+                                    <i class="bi text-secondary bi-arrow-repeat"></i> {% trans %}Change{% endtrans %}
+                                </button>
+                            </div>
+                        </form>
+                        {% else %}
+                        <p>
+                            {% if zone_template_details %}
+                            <span class="badge bg-info">{{ zone_template_details['name'] | lower }}</span>
+                            {% else %}
+                            <span class="badge bg-secondary">none</span>
+                            {% endif %}
+                        </p>
+                        {% endif %}
+                    </div>
+
+                    <!-- DNSSEC -->
+                    {% if pdnssec_use %}
+                    <div class="col-md-4">
+                        <h6 class="text-muted mb-3">{% trans %}DNSSEC{% endtrans %}</h6>
+                        {% if is_secured %}
+                        <a href="{{ base_url_prefix }}/zones/{{ zone_id }}/dnssec" class="btn btn-outline-primary btn-sm">
+                            <i class="bi bi-shield-lock me-1 text-primary"></i>{% trans %}Manage DNSSEC{% endtrans %}
+                        </a>
+                        {% else %}
+                            {% if perm_edit != "none" and meta_edit %}
+                            <form method="post" action="" class="d-inline">
+                                <input type="hidden" name="_token" value="{{ csrf_token }}">
+                                <button class="btn btn-outline-success btn-sm" type="submit" name="sign_zone">
+                                    <i class="bi bi-shield-check me-1 text-success"></i>{% trans %}Sign zone{% endtrans %}
+                                </button>
+                            </form>
+                            {% else %}
+                            <p><span class="badge bg-secondary">{% trans %}Not signed{% endtrans %}</span></p>
+                            {% endif %}
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+    [data-bs-target="#zone-config-body"] .collapse-icon-config {
+        transition: transform 0.2s ease;
+        transform: rotate(0deg);
+    }
+    [data-bs-target="#zone-config-body"]:not(.collapsed) .collapse-icon-config {
+        transform: rotate(180deg);
+    }
+</style>
+
+<script src="{{ base_url_prefix }}/assets/textareaAutoResize.js?time={{ file_version }}"></script>
+
+<script>
+    // Function to toggle Add button state based on select value
+    function toggleAddButton(selectId, buttonId) {
+        const select = document.getElementById(selectId);
+        const button = document.getElementById(buttonId);
+
+        if (select && button) {
+            button.disabled = !select.value || select.value === '';
+        }
+    }
+
+    // Record types that support priority field
+    const RECORD_TYPES_WITH_PRIORITY = ['MX', 'SRV', 'KX', 'NAPTR'];
+    
+    // Function to check if a record type supports priority
+    function supportsPriority(recordType) {
+        return RECORD_TYPES_WITH_PRIORITY.includes(recordType);
+    }
+    
+    // Function to update priority field state based on record type
+    function updatePriorityFieldState(selectElement, priorityInputId) {
+        const recordType = selectElement.value;
+        const priorityInput = document.getElementById(priorityInputId);
+        
+        if (priorityInput) {
+            if (supportsPriority(recordType)) {
+                priorityInput.removeAttribute('readonly');
+                priorityInput.classList.remove('bg-dark-subtle');
+                priorityInput.setAttribute('tabindex', '0');
+            } else {
+                priorityInput.setAttribute('readonly', 'readonly');
+                priorityInput.classList.add('bg-dark-subtle');
+                priorityInput.value = '0';
+                priorityInput.setAttribute('tabindex', '-1');
+            }
+        }
+    }
+    
+    // Check if CNAME is being used at domain root and show warning if it is
+    function checkCnameRootWarning(selectId, nameInputSelector, warningId) {
+        const typeSelect = document.getElementById(selectId);
+        const nameField = document.querySelector(nameInputSelector);
+        const warningDiv = document.getElementById(warningId);
+        
+        if (!typeSelect || !nameField || !warningDiv) return;
+        
+        const isType = typeSelect.value === 'CNAME';
+        const name = nameField.value.trim();
+        const isAtRoot = (name === "" || name === "@");
+        
+        warningDiv.style.display = (isType && isAtRoot) ? 'block' : 'none';
+    }
+    
+    // Set up event listeners for CNAME root warning
+    function setupCnameWarningListeners(selectId, nameInputSelector, warningId) {
+        const typeSelect = document.getElementById(selectId);
+        const nameField = document.querySelector(nameInputSelector);
+        
+        if (typeSelect) {
+            typeSelect.addEventListener('change', function() {
+                checkCnameRootWarning(selectId, nameInputSelector, warningId);
+            });
+        }
+        
+        if (nameField) {
+            nameField.addEventListener('input', function() {
+                checkCnameRootWarning(selectId, nameInputSelector, warningId);
+            });
+        }
+    }
+</script>
+
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        // Handle pre-selected record types for form data restoration
+        function setPreselectedType(selectId) {
+            const typeSelect = document.getElementById(selectId);
+            if (typeSelect && typeSelect.hasAttribute('data-preselect')) {
+                const preselectedType = typeSelect.getAttribute('data-preselect');
+                for (let i = 0; i < typeSelect.options.length; i++) {
+                    if (typeSelect.options[i].value === preselectedType) {
+                        typeSelect.selectedIndex = i;
+                        // Trigger the change event to update the content input
+                        const event = new Event('change');
+                        typeSelect.dispatchEvent(event);
+                        break;
+                    }
+                }
+            }
+        }
+        
+        // Apply to both top and bottom forms
+        setPreselectedType('recordTypeSelectTop');
+        setPreselectedType('recordTypeSelectBottom');
+        
+        // Initialize priority field states for add record forms
+        const topTypeSelect = document.getElementById('recordTypeSelectTop');
+        if (topTypeSelect) {
+            updatePriorityFieldState(topTypeSelect, 'priorityFieldTop');
+        }
+        
+        const bottomTypeSelect = document.getElementById('recordTypeSelectBottom');
+        if (bottomTypeSelect) {
+            updatePriorityFieldState(bottomTypeSelect, 'priorityFieldBottom');
+        }
+        
+        // Initialize priority field states for existing records
+        document.querySelectorAll('.record-priority-field').forEach(priorityField => {
+            const recordType = priorityField.getAttribute('data-record-type');
+            if (recordType && !supportsPriority(recordType)) {
+                priorityField.setAttribute('readonly', 'readonly');
+                priorityField.classList.add('bg-dark-subtle');
+                priorityField.setAttribute('tabindex', '-1');
+            }
+        });
+        
+        // Handle disabled checkboxes
+        document.querySelectorAll('input[type="checkbox"][name$="[disabled]"]').forEach(checkbox => {
+            const row = checkbox.closest('tr');
+            if (!row) return;
+
+            const toggleOpacity = () => row.classList.toggle('opacity-25', checkbox.checked);
+
+            checkbox.addEventListener('change', toggleOpacity);
+            toggleOpacity();
+        });
+
+        // Handle record selection checkboxes
+        const recordCheckboxes = document.getElementsByName('record_id[]');
+        for (let i = 0; i < recordCheckboxes.length; i++) {
+            recordCheckboxes[i].addEventListener('change', function() {
+                updateDeleteButtonState('delete-selected-records', recordCheckboxes);
+                updateSelectedCount(recordCheckboxes);
+            });
+        }
+
+        // Initialize delete button state
+        updateDeleteButtonState('delete-selected-records', recordCheckboxes);
+        
+        // Select/deselect all records checkbox
+        const selectAllCheckbox = document.getElementById('select_edit_records');
+        if (selectAllCheckbox) {
+            selectAllCheckbox.addEventListener('change', function() {
+                toggleEditRecordCheckboxes();
+                updateSelectedCount(recordCheckboxes);
+            });
+        }
+
+        // Handle delete form submission
+        const deleteRecordsForm = document.getElementById('delete-records-form');
+        if (deleteRecordsForm) {
+            deleteRecordsForm.addEventListener('submit', function(e) {
+                // Get all checked checkboxes
+                const checkedBoxes = document.querySelectorAll('input[name="record_id[]"]:checked');
+
+                if (checkedBoxes.length === 0) {
+                    e.preventDefault();
+                    return;
+                }
+
+                const container = document.getElementById('selected-records-container');
+                container.innerHTML = '';
+
+                // Clone checked checkboxes to the delete form
+                checkedBoxes.forEach(function(checkbox) {
+                    const clone = document.createElement('input');
+                    clone.type = 'hidden';
+                    clone.name = 'record_id[]';
+                    clone.value = checkbox.value;
+                    container.appendChild(clone);
+                });
+            });
+        }
+
+        // Create a selection counter
+        const selectionCounterSpan = document.createElement('span');
+        selectionCounterSpan.id = 'selection-counter';
+        selectionCounterSpan.classList.add('ms-2', 'small', 'text-muted');
+        selectionCounterSpan.style.display = 'none';
+        
+        // Find delete button and insert counter after it
+        const deleteForm = document.getElementById('delete-records-form');
+        if (deleteForm) {
+            deleteForm.appendChild(selectionCounterSpan);
+        }
+        
+        
+        // Initialize selection counter
+        updateSelectedCount(recordCheckboxes);
+        
+        // Set up CNAME root warning listeners for top and bottom forms
+        setupCnameWarningListeners('recordTypeSelectTop', 'input[name="name"]', 'cnameRootWarningTop');
+        setupCnameWarningListeners('recordTypeSelectBottom', 'input[name="name"][data-testid="record-name-input"]', 'cnameRootWarningBottom');
+        
+        // Initial check for CNAME warnings
+        checkCnameRootWarning('recordTypeSelectTop', 'input[name="name"]', 'cnameRootWarningTop');
+        checkCnameRootWarning('recordTypeSelectBottom', 'input[name="name"][data-testid="record-name-input"]', 'cnameRootWarningBottom');
+        
+    });
+    
+    // Function to update selected count display
+    function updateSelectedCount(checkboxes) {
+        const counterSpan = document.getElementById('selection-counter');
+        if (!counterSpan) return;
+        
+        const selectedCount = Array.from(checkboxes).filter(checkbox => checkbox.checked).length;
+        const totalCount = checkboxes.length;
+        
+        if (selectedCount > 0) {
+            counterSpan.textContent = selectedCount + ' of ' + totalCount + ' selected';
+            counterSpan.style.display = 'inline-block';
+        } else {
+            counterSpan.style.display = 'none';
+        }
+    }
+    
+    // Function to update delete button state
+    function updateDeleteButtonState(buttonId, checkboxes) {
+        const button = document.getElementById(buttonId);
+        if (!button) return;
+
+        let hasChecked = false;
+        for (let i = 0; i < checkboxes.length; i++) {
+            if (checkboxes[i].checked) {
+                hasChecked = true;
+                break;
+            }
+        }
+
+        button.disabled = !hasChecked;
+    }
+
+    function updateEditButtonState(checkboxes) {
+        const editButton = document.getElementById('edit-selected-record');
+        if (!editButton) return;
+
+        let checkedCount = 0;
+        for (let i = 0; i < checkboxes.length; i++) {
+            if (checkboxes[i].checked) {
+                checkedCount++;
+            }
+        }
+
+        // Enable only when exactly one record is selected
+        editButton.disabled = checkedCount !== 1;
+    }
+
+    function editSelectedRecord() {
+        const recordCheckboxes = document.getElementsByName('record_id[]');
+        let selectedRecordId = null;
+
+        for (let i = 0; i < recordCheckboxes.length; i++) {
+            if (recordCheckboxes[i].checked) {
+                selectedRecordId = recordCheckboxes[i].value;
+                break;
+            }
+        }
+
+        if (selectedRecordId) {
+            // Validate that the record ID is a valid integer
+            if (!/^\d+$/.test(selectedRecordId)) {
+                console.error('Invalid record ID format');
+                return;
+            }
+
+            // Encode the record ID for safe URL construction
+            const encodedRecordId = encodeURIComponent(selectedRecordId);
+            window.location.href = '{{ base_url_prefix }}/zones/{{ zone_id }}/records/' + encodedRecordId + '/edit';
+        }
+    }
+
+    function updateRecordSelectionButtons() {
+        const recordCheckboxes = document.getElementsByName('record_id[]');
+        updateDeleteButtonState('delete-selected-records', recordCheckboxes);
+        updateEditButtonState(recordCheckboxes);
+    }
+
+    // Function to toggle all record checkboxes
+    function toggleEditRecordCheckboxes() {
+        const selectAllCheckbox = document.getElementById('select_edit_records');
+        const recordCheckboxes = document.getElementsByName('record_id[]');
+        const checked = selectAllCheckbox.checked;
+
+        for (let i = 0; i < recordCheckboxes.length; i++) {
+            recordCheckboxes[i].checked = checked;
+        }
+
+        updateDeleteButtonState('delete-selected-records', recordCheckboxes);
+        updateEditButtonState(recordCheckboxes);
+    }
+
+
+</script>

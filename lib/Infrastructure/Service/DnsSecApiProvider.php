@@ -6,7 +6,7 @@ namespace Poweradmin\Infrastructure\Service;
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2026 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -22,38 +22,29 @@ namespace Poweradmin\Infrastructure\Service;
  *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+use Poweradmin\Domain\Error\ApiErrorException;
 use Poweradmin\Domain\Model\CryptoKey;
 use Poweradmin\Domain\Model\Zone;
 use Poweradmin\Domain\Service\DnssecProvider;
 use Poweradmin\Domain\Utility\DnssecTransformer;
 use Poweradmin\Infrastructure\Api\PowerdnsApiClient;
-use Poweradmin\Infrastructure\Logger\LoggerInterface;
-
-// TODO:
-// - Add debug logging (if enabled)
-// - Better error handling (visual response)
-// - Add tests (unit, integration, functional)
-// - Provide documentation
-// - Test syslog logging
-// - Move logging into middleware, decorator, or event listener/subscriber
-// - define interfaces or DTOs for returned data by PowerDNS API
+use Poweradmin\Infrastructure\Logger\LegacyLoggerInterface;
 
 class DnsSecApiProvider implements DnssecProvider
 {
     private PowerdnsApiClient $client;
-    private LoggerInterface $logger;
+    private LegacyLoggerInterface $logger;
     private DnssecTransformer $transformer;
     private string $clientIp;
     private string $userLogin;
 
     public function __construct(
         PowerdnsApiClient $client,
-        LoggerInterface   $logger,
+        LegacyLoggerInterface $logger,
         DnssecTransformer $transformer,
-        string            $clientIp,
-        string            $userLogin
-    )
-    {
+        string $clientIp,
+        string $userLogin
+    ) {
         $this->client = $client;
         $this->logger = $logger;
         $this->transformer = $transformer;
@@ -85,8 +76,14 @@ class DnsSecApiProvider implements DnssecProvider
 
     public function isZoneSecured(string $zoneName, $config): bool
     {
-        $zone = new Zone($zoneName);
-        return $this->client->isZoneSecured($zone);
+        try {
+            $zone = new Zone($zoneName);
+            return $this->client->isZoneSecured($zone);
+        } catch (ApiErrorException $e) {
+            // Return false instead of crashing when API call fails
+            // (e.g., due to invalid record data in the zone)
+            return false;
+        }
     }
 
     public function getDsRecords(string $zoneName): array
@@ -161,7 +158,9 @@ class DnsSecApiProvider implements DnssecProvider
         $zone = new Zone($zoneName);
         $keys = $this->client->getZoneKeys($zone);
         foreach ($keys as $key) {
-            if ($key->getId() === $keyId) {
+            // Use loose comparison (==) instead of strict (===) to handle potential
+            // type mismatches between PowerDNS API responses and PHP type casting
+            if ($key->getId() == $keyId) {
                 return true;
             }
         }
@@ -173,7 +172,9 @@ class DnsSecApiProvider implements DnssecProvider
         $zone = new Zone($zoneName);
         $keys = $this->client->getZoneKeys($zone);
         foreach ($keys as $key) {
-            if ($key->getId() === $keyId) {
+            // Use loose comparison (==) instead of strict (===) to handle potential
+            // type mismatches between PowerDNS API responses and PHP type casting
+            if ($key->getId() == $keyId) {
                 return $this->transformer->transformKey($key);
             }
         }
@@ -191,6 +192,29 @@ class DnsSecApiProvider implements DnssecProvider
         }
 
         return false;
+    }
+
+    public function importZoneKey(string $zoneName, string $keyType, string $algorithm, string $privateKeyPem): bool
+    {
+        $zone = new Zone($zoneName);
+        $result = $this->client->importZoneKey($zone, $keyType, $algorithm, $privateKeyPem);
+        $this->logAction('dnssec_import_zone_key', $zoneName, ['type' => $keyType, 'algorithm' => $algorithm, 'result' => $result]);
+        return $result;
+    }
+
+    public function exportZoneKeyPem(string $zoneName, int $keyId): ?string
+    {
+        $zone = new Zone($zoneName);
+        $payload = $this->client->getZoneKeyWithPrivate($zone, $keyId);
+        if ($payload === null) {
+            return null;
+        }
+        $pem = $payload['privatekey'] ?? null;
+        if (!is_string($pem) || $pem === '') {
+            return null;
+        }
+        $this->logAction('dnssec_export_zone_key', $zoneName, ['keyId' => $keyId]);
+        return $pem;
     }
 
     private function logAction(string $action, string $zoneName, array $context = []): void

@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -25,32 +25,88 @@
  *
  * @package     Poweradmin
  * @copyright   2007-2010 Rejo Zenger <rejo@zenger.nl>
- * @copyright   2010-2024 Poweradmin Development Team
+ * @copyright   2010-2025 Poweradmin Development Team
  * @license     https://opensource.org/licenses/GPL-3.0 GPL
  */
 
 namespace Poweradmin\Application\Controller;
 
-use Poweradmin\Application\Presenter\ErrorPresenter;
-use Poweradmin\Application\Service\DnssecProviderFactory;
+use Exception;
+use Poweradmin\Application\Service\RecordCommentService;
+use Poweradmin\Application\Service\RecordCommentSyncService;
+use Poweradmin\Application\Service\RecordManagerService;
 use Poweradmin\BaseController;
-use Poweradmin\Domain\Error\ErrorMessage;
 use Poweradmin\Domain\Model\Permission;
 use Poweradmin\Domain\Model\RecordType;
+use Poweradmin\Domain\Service\RecordTypeService;
 use Poweradmin\Domain\Model\UserManager;
+use Poweradmin\Domain\Service\DnsIdnService;
 use Poweradmin\Domain\Service\DnsRecord;
+use Poweradmin\Domain\Service\DomainRecordCreator;
+use Poweradmin\Domain\Service\FormStateService;
+use Poweradmin\Domain\Service\ReverseRecordCreator;
+use Poweradmin\Domain\Service\UserContextService;
+use Poweradmin\Domain\Utility\DnsHelper;
 use Poweradmin\Infrastructure\Logger\LegacyLogger;
-use Valitron;
+use Poweradmin\Infrastructure\Utility\IpAddressRetriever;
+use Symfony\Component\Validator\Constraints as Assert;
 
 class AddRecordController extends BaseController
 {
-    private LegacyLogger $logger;
+    private LegacyLogger $auditLogger;
+    private IpAddressRetriever $ipAddressRetriever;
+    private DnsRecord $dnsRecord;
+    private DomainRecordCreator $domainRecordCreator;
+    private ReverseRecordCreator $reverseRecordCreator;
+    private RecordManagerService $recordManager;
+    private RecordTypeService $recordTypeService;
+    private FormStateService $formStateService;
+    private UserContextService $userContextService;
 
     public function __construct(array $request)
     {
         parent::__construct($request);
 
-        $this->logger = new LegacyLogger($this->db);
+        // ConfigurationManager is now handled by the BaseController
+        $this->auditLogger = new LegacyLogger($this->db);
+        $this->ipAddressRetriever = new IpAddressRetriever($_SERVER);
+        $this->dnsRecord = new DnsRecord($this->db, $this->getConfig());
+        $this->formStateService = new FormStateService();
+
+        $backendProvider = $this->createDnsBackendProvider();
+        $repositoryFactory = $this->getRepositoryFactory($backendProvider);
+        $recordCommentRepository = $repositoryFactory->createRecordCommentRepository();
+        $recordCommentService = new RecordCommentService($recordCommentRepository);
+        $commentSyncService = new RecordCommentSyncService($recordCommentService, null, $backendProvider);
+
+        $this->recordManager = new RecordManagerService(
+            $this->db,
+            $this->dnsRecord,
+            $recordCommentService,
+            $commentSyncService,
+            $this->auditLogger,
+            $this->getConfig(),
+            $backendProvider
+        );
+
+        $this->recordTypeService = new RecordTypeService($this->getConfig());
+
+        $this->domainRecordCreator = new DomainRecordCreator(
+            $this->getConfig(),
+            $this->auditLogger,
+            $this->dnsRecord,
+        );
+
+        $this->reverseRecordCreator = new ReverseRecordCreator(
+            $this->db,
+            $this->getConfig(),
+            $this->auditLogger,
+            $this->dnsRecord,
+            $recordCommentService,
+            $this->createDnsBackendProvider()
+        );
+
+        $this->userContextService = new UserContextService();
     }
 
     public function run(): void
@@ -58,151 +114,439 @@ class AddRecordController extends BaseController
         $this->checkId();
 
         $perm_edit = Permission::getEditPermission($this->db);
-        $zone_id = htmlspecialchars($_GET['id']);
-        $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-        $zone_type = $dnsRecord->get_domain_type($zone_id);
-        $user_is_zone_owner = UserManager::verify_user_is_owner_zoneid($this->db, $zone_id);
+        $zone_id = (int)$this->getSafeRequestValue('zone_id');
+        $zone_type = $this->dnsRecord->getDomainType($zone_id);
+        $user_is_zone_owner = UserManager::verifyUserIsOwnerZoneId($this->db, $zone_id);
 
         $this->checkCondition($zone_type == "SLAVE"
             || $perm_edit == "none"
             || ($perm_edit == "own" || $perm_edit == "own_as_client")
-            && !$user_is_zone_owner, _("You do not have the permission to add a record to this zone.")
-        );
+            && !$user_is_zone_owner, _("You do not have the permission to add a record to this zone."));
 
         if ($this->isPost()) {
             $this->validateCsrfToken();
-            $this->addRecord();
+
+            if (isset($_POST['multi_record_mode']) && isset($_POST['records']) && is_array($_POST['records'])) {
+                $this->addMultipleRecords();
+            } else {
+                $this->addRecord();
+            }
         }
         $this->showForm();
     }
 
     private function addRecord(): void
     {
-        $v = new Valitron\Validator($_POST);
-        $v->rules([
-            'required' => ['content', 'type', 'ttl'],
-            'integer' => ['priority', 'ttl'],
-        ]);
+        // These are required fields
+        $constraints = [
+            'content' => [
+                new Assert\NotBlank()
+            ],
+            'type' => [
+                new Assert\NotBlank()
+            ]
+        ];
 
-        if (!$v->validate()) {
-            $this->showFirstError($v->errors());
+        // Optional fields won't be validated if they're empty due to the filter in BaseController
+
+        $this->setValidationConstraints($constraints);
+
+        if (!$this->doValidateRequest($_POST)) {
+            $this->showFirstValidationError($_POST);
         }
 
         $name = $_POST['name'] ?? '';
         $content = $_POST['content'];
         $type = $_POST['type'];
-        $prio = $_POST['prio'];
-        $ttl = $_POST['ttl'];
-        $zone_id = htmlspecialchars($_GET['id']);
+        $prio = isset($_POST['prio']) && $_POST['prio'] !== '' ? (int)$_POST['prio'] : 0;
+        $ttl = isset($_POST['ttl']) && $_POST['ttl'] !== '' ? (int)$_POST['ttl'] : $this->config->get('dns', 'ttl', 3600);
+        $comment = $_POST['comment'] ?? '';
+        $zone_id = (int)$this->getSafeRequestValue('zone_id');
 
-        $this->createReverseRecord($name, $type, $content, $zone_id, $ttl, $prio);
+        // Convert IDN record name and content to punycode
+        $name = DnsIdnService::toPunycode($name);
+        $content = DnsIdnService::convertContentToPunycode($type, $content);
 
-        if ($this->createRecord($zone_id, $name, $type, $content, $ttl, $prio)) {
-            unset($_POST);
+        // Normalize record name to full FQDN (always, regardless of display setting)
+        // This converts @ to zone apex and ensures proper zone suffix
+        $zone_name = $this->dnsRecord->getDomainNameById($zone_id);
+        if ($zone_name === null) {
+            $this->showError(_('Zone not found.'));
+            return;
         }
+        $name = DnsHelper::restoreZoneSuffix($name, $zone_name);
+
+        try {
+            if (!$this->createRecord($zone_id, $name, $type, $content, $ttl, $prio, $comment)) {
+                // Get system errors that were generated during validation
+                $systemErrors = $this->getSystemErrors();
+                $errorMessage = !empty($systemErrors) ? end($systemErrors) :
+                    _('This record was not valid and could not be added. It may already exist or contain invalid data.');
+
+                // Determine which field has an error
+                $fieldWithError = $this->determineFieldWithError($errorMessage);
+
+                // Generate a form ID and store the invalid form data with validation error
+                $formId = $this->formStateService->generateFormId('add_record');
+                $formData = [
+                    'name' => $name,
+                    'content' => $content,
+                    'type' => $type,
+                    'prio' => $prio,
+                    'ttl' => $ttl,
+                    'comment' => $comment,
+                    'error' => true,
+                    'errorMessage' => $errorMessage,
+                    'fieldError' => $fieldWithError
+                ];
+                $this->formStateService->saveFormData($formId, $formData);
+
+                $this->redirect('/zones/' . $zone_id . '/records/add?form_id=' . $formId);
+                return;
+            }
+        } catch (Exception $e) {
+            // Handle exceptions from the validation process
+            $errorMessage = $e->getMessage();
+            $fieldWithError = $this->determineFieldWithError($errorMessage);
+
+            $formId = $this->formStateService->generateFormId('add_record');
+            $formData = [
+                'name' => $name,
+                'content' => $content,
+                'type' => $type,
+                'prio' => $prio,
+                'ttl' => $ttl,
+                'comment' => $comment,
+                'error' => true,
+                'errorMessage' => $errorMessage,
+                'fieldError' => $fieldWithError
+            ];
+            $this->formStateService->saveFormData($formId, $formData);
+
+            $this->redirect('/zones/' . $zone_id . '/records/add?form_id=' . $formId);
+            return;
+        }
+
+        // Clear form data if it exists in the session
+        if (isset($_POST['form_token'])) {
+            $this->formStateService->clearFormData($_POST['form_token']);
+        }
+
+        if (isset($_POST['reverse'])) {
+            $reverseResult = $this->createReverseRecord($name, $type, $content, $zone_id, $ttl, $prio, $comment);
+
+            if ($reverseResult && isset($reverseResult['success']) && $reverseResult['success']) {
+                // Check if this is a warning (duplicate PTR exists for different hostname)
+                if (isset($reverseResult['type']) && $reverseResult['type'] === 'warning') {
+                    $message = _('Record successfully added.') . ' ' . $reverseResult['message'];
+                    $this->setMessage('edit', 'warning', $message);
+                } else {
+                    $message = _('Record successfully added. A matching PTR record was also created.');
+                    $this->setMessage('edit', 'success', $message);
+                }
+            } elseif ($reverseResult && isset($reverseResult['success']) && !$reverseResult['success'] && isset($reverseResult['message'])) {
+                // Reverse record creation failed with a specific message
+                $message = _('Record successfully added, but PTR record creation failed: ') . $reverseResult['message'];
+                $this->setMessage('edit', 'warning', $message);
+            } else {
+                // Reverse record creation failed without a specific message
+                $this->setMessage('edit', 'success', _('The record was successfully added, but PTR record creation failed.'));
+            }
+        } elseif (isset($_POST['create_domain_record'])) {
+            $domainRecord = $this->createDomainRecord($name, $type, $content, $zone_id, $comment);
+            $message = $domainRecord ? _('Record successfully added. A matching A record was also created.') : _('The record was successfully added.');
+            $this->setMessage('edit', 'success', $message);
+        } else {
+            $this->setMessage('edit', 'success', _('The record was successfully added.'));
+        }
+
+        // Redirect back to zone edit page
+        $this->redirect('/zones/' . $zone_id . '/edit');
     }
 
     private function showForm(): void
     {
-        $zone_id = htmlspecialchars($_GET['id']);
-        $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-        $zone_name = $dnsRecord->get_domain_name_by_id($zone_id);
-        $ttl = $this->config('dns_ttl');
-        $iface_add_reverse_record = $this->config('iface_add_reverse_record');
-        $is_reverse_zone = preg_match('/i(p6|n-addr).arpa/i', $zone_name);
+        $zone_id = (int)$this->getSafeRequestValue('zone_id');
+        $zone_name = $this->dnsRecord->getDomainNameById($zone_id);
+        $isReverseZone = DnsHelper::isReverseZone($zone_name);
 
-        if (str_starts_with($zone_name, "xn--")) {
-            $idn_zone_name = idn_to_utf8($zone_name, IDNA_NONTRANSITIONAL_TO_ASCII);
+        $ttl = $this->config->get('dns', 'ttl', 3600);
+        $isDnsSecEnabled = $this->config->get('dnssec', 'enabled', false);
+
+        if ($zone_name !== null && str_starts_with($zone_name, "xn--")) {
+            $idn_zone_name = DnsIdnService::toUtf8($zone_name);
         } else {
             $idn_zone_name = "";
         }
 
+        // Retrieve form state data from session (e.g. after validation error redirect)
+        $formData = null;
+        if (isset($_REQUEST['form_id']) && !empty($_REQUEST['form_id'])) {
+            $formData = $this->formStateService->getFormData($_REQUEST['form_id']);
+        }
+
+        // Build saved_records array for multi-row restore
+        $savedRecords = [];
+        if ($formData && isset($formData['saved_records']) && is_array($formData['saved_records'])) {
+            $savedRecords = $formData['saved_records'];
+        }
+
         $this->render('add_record.html', [
-            'types' => RecordType::getTypes(),
-            'name' => $_POST['name'] ?? '',
-            'type' => $_POST['type'] ?? '',
-            'content' => $_POST['content'] ?? '',
-            'ttl' => $_POST['ttl'] ?? $ttl,
-            'prio' => $_POST['prio'] ?? 0,
+            'types' => $isReverseZone
+                ? $this->recordTypeService->getReverseZoneTypes($isDnsSecEnabled, $this->getPdnsCapabilities())
+                : $this->recordTypeService->getDomainZoneTypes($isDnsSecEnabled, $this->getPdnsCapabilities()),
+            'deprecated_types' => RecordType::DEPRECATED_TYPES,
+            'name' => $formData['name'] ?? $_POST['name'] ?? '',
+            'type' => $formData['type'] ?? $_POST['type'] ?? '',
+            'content' => $formData['content'] ?? $_POST['content'] ?? '',
+            'ttl' => $formData['ttl'] ?? $_POST['ttl'] ?? $ttl,
+            'prio' => $formData['prio'] ?? $_POST['prio'] ?? 0,
             'zone_id' => $zone_id,
             'zone_name' => $zone_name,
             'idn_zone_name' => $idn_zone_name,
-            'is_reverse_zone' => $is_reverse_zone,
-            'iface_add_reverse_record' => $iface_add_reverse_record,
+            'is_reverse_zone' => $isReverseZone,
+            'iface_add_reverse_record' => $this->config->get('interface', 'add_reverse_record', false),
+            'iface_add_domain_record' => $this->config->get('interface', 'add_domain_record', false),
+            'iface_record_comments' => $this->config->get('interface', 'show_record_comments', true),
+            'display_hostname_only' => $this->createUserPreferenceService()->getDisplayHostnameOnly(
+                $this->userContextService->getLoggedInUserId()
+            ),
+            'form_data' => $formData,
+            'saved_records' => $savedRecords,
         ]);
     }
 
     public function checkId(): void
     {
-        $v = new Valitron\Validator($_GET);
-        $v->rules([
-            'required' => ['id'],
-            'integer' => ['id']
-        ]);
-        if (!$v->validate()) {
-            $this->showFirstError($v->errors());
+        $constraints = [
+            'id' => [
+                new Assert\NotBlank()
+            ]
+        ];
+
+        $this->setValidationConstraints($constraints);
+
+        if (!$this->doValidateRequest($_GET)) {
+            $this->showFirstValidationError($_GET);
         }
     }
 
-    public function createReverseRecord($name, $type, $content, string $zone_id, $ttl, $prio): void
+    private function createRecord(int $zone_id, $name, $type, $content, $ttl, $prio, $comment): bool
     {
-        $iface_add_reverse_record = $this->config('iface_add_reverse_record');
-        $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-
-        if ((isset($_POST["reverse"])) && $name && $iface_add_reverse_record) {
-            if ($type === 'A') {
-                $content_array = preg_split("/\./", $content);
-                $content_rev = sprintf("%d.%d.%d.%d.in-addr.arpa", $content_array[3], $content_array[2], $content_array[1], $content_array[0]);
-                $zone_rev_id = $dnsRecord->get_best_matching_zone_id_from_name($content_rev);
-            } elseif ($type === 'AAAA') {
-                $content_rev = DnsRecord::convert_ipv6addr_to_ptrrec($content);
-                $zone_rev_id = $dnsRecord->get_best_matching_zone_id_from_name($content_rev);
-            }
-
-            if (isset($zone_rev_id) && $zone_rev_id != -1) {
-                $zone_name = $dnsRecord->get_domain_name_by_id($zone_id);
-                $fqdn_name = sprintf("%s.%s", $name, $zone_name);
-                $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-                if ($dnsRecord->add_record($zone_rev_id, $content_rev, 'PTR', $fqdn_name, $ttl, $prio)) {
-                    $this->logger->log_info(sprintf('client_ip:%s user:%s operation:add_record record_type:PTR record:%s content:%s ttl:%s priority:%s',
-                        $_SERVER['REMOTE_ADDR'], $_SESSION["userlogin"],
-                        $content_rev, $fqdn_name, $ttl, $prio), $zone_id);
-
-                    if ($this->config('pdnssec_use')) {
-                        $dnssecProvider = DnssecProviderFactory::create($this->db, $this->getConfig());
-                        $dnssecProvider->rectifyZone($zone_name);
-                    }
-                }
-            } elseif (isset($content_rev)) {
-                $error = new ErrorMessage(sprintf(_('There is no matching reverse-zone for: %s.'), $content_rev));
-                $errorPresenter = new ErrorPresenter();
-                $errorPresenter->present($error);
-            }
-        }
+        return $this->recordManager->createRecord(
+            $zone_id,
+            $name,
+            $type,
+            $content,
+            $ttl,
+            $prio,
+            $comment,
+            $this->userContextService->getLoggedInUsername(),
+            $this->ipAddressRetriever->getClientIp()
+        );
     }
 
-    public function createRecord(string $zone_id, $name, $type, $content, $ttl, $prio): bool
+    private function createReverseRecord($name, $type, $content, int $zone_id, $ttl, $prio, string $comment): array
     {
-        $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-        $zone_name = $dnsRecord->get_domain_name_by_id($zone_id);
+        $result = $this->reverseRecordCreator->createReverseRecord(
+            $name,
+            $type,
+            $content,
+            $zone_id,
+            $ttl,
+            $prio,
+            $comment,
+            $this->userContextService->getLoggedInUsername()
+        );
 
-        $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-        if ($dnsRecord->add_record($zone_id, $name, $type, $content, $ttl, $prio)) {
-            $this->logger->log_info(sprintf('client_ip:%s user:%s operation:add_record record_type:%s record:%s.%s content:%s ttl:%s priority:%s',
-                $_SERVER['REMOTE_ADDR'], $_SESSION["userlogin"],
-                $type, $name, $zone_name, $content, $ttl, $prio), $zone_id
-            );
+        if (isset($result['success']) && !$result['success']) {
+            $this->setMessage('add_record', 'error', $result['message']);
+        }
 
-            if ($this->config('pdnssec_use')) {
-                $dnssecProvider = DnssecProviderFactory::create($this->db, $this->getConfig());
-                $dnssecProvider->rectifyZone($zone_name);
-            }
+        return $result;
+    }
 
-            $this->setMessage('add_record', 'success', _('The record was successfully added.'));
+    private function createDomainRecord(string $name, string $type, string $content, int $zone_id, string $comment): bool
+    {
+        $result = $this->domainRecordCreator->addDomainRecord(
+            $name,
+            $type,
+            $content,
+            $zone_id,
+            $comment,
+            $this->userContextService->getLoggedInUsername()
+        );
+
+        if ($result['success']) {
             return true;
         } else {
-            $this->setMessage('add_record', 'error', _('This record was not valid and could not be added.'));
+            $this->setMessage('add_record', 'error', $result['message']);
             return false;
         }
+    }
+
+    /**
+     * Determine which field has an error based on the error message
+     *
+     * @param string $errorMessage The error message
+     * @return string The name of the field with an error
+     */
+    private function determineFieldWithError(string $errorMessage): string
+    {
+        $lowerError = strtolower($errorMessage);
+
+        // Check for specific field mentions in the error message
+        if (strpos($lowerError, 'name') !== false && strpos($lowerError, 'invalid') !== false) {
+            return 'name';
+        } elseif (
+            strpos($lowerError, 'content') !== false ||
+                 strpos($lowerError, 'value') !== false ||
+                 strpos($lowerError, 'address') !== false ||
+                 strpos($lowerError, 'hostname') !== false
+        ) {
+            return 'content';
+        } elseif (strpos($lowerError, 'ttl') !== false) {
+            return 'ttl';
+        } elseif (strpos($lowerError, 'prio') !== false || strpos($lowerError, 'priority') !== false) {
+            return 'prio';
+        } elseif (strpos($lowerError, 'already exists') !== false) {
+            return 'name-content-duplicate';
+        }
+
+        // Default to content field as that's the most common error source
+        return 'content';
+    }
+
+    private function addMultipleRecords(): void
+    {
+        $zone_id = (int)$this->getSafeRequestValue('zone_id');
+        $records = $_POST['records'] ?? [];
+        $successCount = 0;
+        $failureCount = 0;
+        $matchingRecordCount = 0;
+        $ptrWarnings = [];
+        $formId = $this->formStateService->generateFormId('add_record');
+
+        if (empty($records)) {
+            $formData = [
+                'error' => true,
+                'errorMessage' => _('No records were provided.'),
+            ];
+            $this->formStateService->saveFormData($formId, $formData);
+            $this->redirect('/zones/' . $zone_id . '/records/add?form_id=' . $formId);
+            return;
+        }
+
+        $zone_name = $this->dnsRecord->getDomainNameById($zone_id);
+        if ($zone_name === null) {
+            $this->showError(_('Zone not found.'));
+            return;
+        }
+
+        foreach ($records as $record) {
+            // Skip non-array or incomplete records
+            if (!is_array($record) || empty($record['content']) || empty($record['type'])) {
+                continue;
+            }
+
+            $name = DnsHelper::restoreZoneSuffix($record['name'] ?? '', $zone_name);
+            $content = $record['content'];
+            $type = $record['type'];
+            $prio = isset($record['prio']) && $record['prio'] !== '' ? (int)$record['prio'] : 0;
+            $ttl = isset($record['ttl']) && $record['ttl'] !== '' ? (int)$record['ttl'] : $this->config->get('dns', 'ttl', 3600);
+            $comment = $record['comment'] ?? '';
+
+            if ($this->createRecord($zone_id, $name, $type, $content, $ttl, $prio, $comment)) {
+                $successCount++;
+
+                // Handle reverse or domain record creation for individual records
+                if (isset($record['reverse']) && $record['reverse']) {
+                    $reverseResult = $this->createReverseRecord($name, $type, $content, $zone_id, $ttl, $prio, $comment);
+                    if (!empty($reverseResult['success'])) {
+                        $matchingRecordCount++;
+                    }
+                    if (isset($reverseResult['type']) && $reverseResult['type'] === 'warning') {
+                        $ptrWarnings[] = $reverseResult['message'];
+                    }
+                } elseif (isset($record['create_domain_record']) && $record['create_domain_record']) {
+                    if ($this->createDomainRecord($name, $type, $content, $zone_id, $comment)) {
+                        $matchingRecordCount++;
+                    }
+                }
+            } else {
+                $failureCount++;
+            }
+        }
+
+        // Clear form data if it exists in the session
+        if (isset($_POST['form_token'])) {
+            $this->formStateService->clearFormData($_POST['form_token']);
+        }
+
+        if ($successCount > 0) {
+            $message = sprintf(_('%d record(s) were successfully added.'), $successCount);
+            if ($matchingRecordCount > 0) {
+                $message .= ' ' . sprintf(_('%d matching record(s) were also created.'), $matchingRecordCount);
+            }
+            if ($failureCount > 0) {
+                $message .= ' ' . sprintf(_('%d record(s) failed to be added.'), $failureCount);
+
+                // Get system errors that were generated during validation
+                $systemErrors = $this->getSystemErrors();
+                $errorMessage = !empty($systemErrors) ? end($systemErrors) :
+                    _('Some records could not be added. They may already exist or contain invalid data.');
+
+                // Store form data with error flag for failed records
+                $formId = $this->formStateService->generateFormId('add_record');
+                $formData = [
+                    'error' => true,
+                    'multi_record_error' => true,
+                    'failure_count' => $failureCount,
+                    'errorMessage' => $errorMessage
+                ];
+                $this->formStateService->saveFormData($formId, $formData);
+
+                // Redirect to edit page since some records were already created
+                $this->redirect('/zones/' . $zone_id . '/edit?form_id=' . $formId);
+                return;
+            } elseif (!empty($ptrWarnings)) {
+                // Success with PTR warnings
+                $message .= ' ' . implode(' ', $ptrWarnings);
+                $this->setMessage('edit', 'warning', $message);
+            } else {
+                $this->setMessage('edit', 'success', $message);
+            }
+        } else {
+            // Get system errors that were generated during validation
+            $systemErrors = $this->getSystemErrors();
+            $errorMessage = !empty($systemErrors) ? end($systemErrors) :
+                _('Failed to add any records. They may contain invalid data.');
+
+            // Store form data with error flag for all failed records
+            // Include all records so the form can be fully restored
+            $firstRecord = reset($records);
+            $formId = $this->formStateService->generateFormId('add_record');
+            $formData = [
+                'error' => true,
+                'multi_record_error' => true,
+                'failure_count' => $failureCount,
+                'errorMessage' => $errorMessage,
+                'name' => is_array($firstRecord) ? ($firstRecord['name'] ?? '') : '',
+                'type' => is_array($firstRecord) ? ($firstRecord['type'] ?? '') : '',
+                'content' => is_array($firstRecord) ? ($firstRecord['content'] ?? '') : '',
+                'prio' => is_array($firstRecord) ? ($firstRecord['prio'] ?? 0) : 0,
+                'ttl' => is_array($firstRecord) ? ($firstRecord['ttl'] ?? '') : '',
+                'comment' => is_array($firstRecord) ? ($firstRecord['comment'] ?? '') : '',
+                'saved_records' => array_values($records),
+            ];
+            $this->formStateService->saveFormData($formId, $formData);
+
+            // Redirect with form_id to show errors
+            $this->redirect('/zones/' . $zone_id . '/records/add?form_id=' . $formId);
+            return;
+        }
+
+        // Redirect back to zone edit page
+        $this->redirect('/zones/' . $zone_id . '/edit');
     }
 }

@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -25,98 +25,146 @@
  *
  * @package     Poweradmin
  * @copyright   2007-2010 Rejo Zenger <rejo@zenger.nl>
- * @copyright   2010-2024 Poweradmin Development Team
+ * @copyright   2010-2025 Poweradmin Development Team
  * @license     https://opensource.org/licenses/GPL-3.0 GPL
  */
 
 namespace Poweradmin\Application\Controller;
 
 use Poweradmin\Application\Service\DnssecProviderFactory;
+use Poweradmin\Application\Service\RecordCommentService;
 use Poweradmin\BaseController;
-use Poweradmin\Domain\Model\Permission;
 use Poweradmin\Domain\Model\UserManager;
+use Poweradmin\Domain\Service\DnsIdnService;
 use Poweradmin\Domain\Service\DnsRecord;
+use Poweradmin\Domain\Service\UserContextService;
+use Poweradmin\Domain\Utility\DnsHelper;
+use Poweradmin\Domain\Utility\IpHelper;
 use Poweradmin\Infrastructure\Logger\LegacyLogger;
-use Valitron;
+use Poweradmin\Infrastructure\Utility\IpAddressRetriever;
+use Symfony\Component\Validator\Constraints as Assert;
 
 class DeleteDomainController extends BaseController
 {
 
-    private LegacyLogger $logger;
+    private LegacyLogger $auditLogger;
+    private RecordCommentService $recordCommentService;
+    private UserContextService $userContextService;
+    private IpAddressRetriever $ipAddressRetriever;
 
     public function __construct(array $request)
     {
         parent::__construct($request);
 
-        $this->logger = new LegacyLogger($this->db);
+        $this->auditLogger = new LegacyLogger($this->db);
+        $backendProvider = $this->createDnsBackendProvider();
+        $repositoryFactory = $this->getRepositoryFactory($backendProvider);
+        $recordCommentRepository = $repositoryFactory->createRecordCommentRepository();
+        $this->recordCommentService = new RecordCommentService($recordCommentRepository);
+        $this->userContextService = new UserContextService();
+        $this->ipAddressRetriever = new IpAddressRetriever($_SERVER);
     }
 
     public function run(): void
     {
-        $v = new Valitron\Validator($_GET);
-        $v->rules([
-            'required' => ['id'],
-            'integer' => ['id'],
-        ]);
-        if (!$v->validate()) {
-            $this->showFirstError($v->errors());
+        $constraints = [
+            'id' => [
+                new Assert\NotBlank(),
+                new Assert\Type('numeric')
+            ]
+        ];
+
+        $this->setValidationConstraints($constraints);
+
+        if (!$this->doValidateRequest($this->getRequest())) {
+            $this->showFirstValidationError($this->getRequest());
         }
 
-        $zone_id = htmlspecialchars($_GET['id']);
+        $zone_id = (int)$this->getSafeRequestValue('id');
 
-        $perm_edit = Permission::getEditPermission($this->db);
-        $user_is_zone_owner = UserManager::verify_user_is_owner_zoneid($this->db, $zone_id);
-        $this->checkCondition($perm_edit != "all" && ($perm_edit != "own" || !$user_is_zone_owner), _("You do not have the permission to delete a zone."));
+        // Check zone-specific delete permission (includes group permissions)
+        $userId = $this->userContextService->getLoggedInUserId();
+        $user_is_zone_owner = UserManager::verifyUserIsOwnerZoneId($this->db, $zone_id);
+        $canDelete = UserManager::canUserPerformZoneAction($this->db, $userId, $zone_id, 'zone_delete_own');
+        $canDeleteOthers = UserManager::verifyPermission($this->db, 'zone_delete_others');
 
-        if (isset($_GET['confirm'])) {
+        $this->checkCondition(
+            !$canDeleteOthers && !$canDelete,
+            _("You do not have the permission to delete a zone.")
+        );
+
+        if ($this->isPost()) {
+            $this->validateCsrfToken();
             $this->deleteDomain($zone_id);
         } else {
             $this->showDeleteDomain($zone_id);
         }
     }
 
-    private function deleteDomain(string $zone_id): void
+    private function deleteDomain(int $zone_id): void
     {
         $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-        $zone_info = $dnsRecord->get_zone_info_from_id($zone_id);
-        $pdnssec_use = $this->config('pdnssec_use');
+        $zone_info = $dnsRecord->getZoneInfoFromId($zone_id);
+        $pdnssec_use = $this->config->get('dnssec', 'enabled', false);
 
         if ($pdnssec_use && $zone_info['type'] == 'MASTER') {
-            $zone_name = $dnsRecord->get_domain_name_by_id($zone_id);
+            $zone_name = $dnsRecord->getDomainNameById($zone_id);
 
             $dnssecProvider = DnssecProviderFactory::create($this->db, $this->getConfig());
-            if ($dnssecProvider->isZoneSecured($zone_name, $this->getConfig())) {
+            if ($dnssecProvider->isZoneSecured($zone_name, $this->config)) {
                 $dnssecProvider->unsecureZone($zone_name);
             }
         }
 
-        if ($dnsRecord->delete_domain($zone_id)) {
-            $this->logger->log_info(sprintf('client_ip:%s user:%s operation:delete_zone zone:%s zone_type:%s',
-                $_SERVER['REMOTE_ADDR'], $_SESSION["userlogin"],
-                $zone_info['name'], $zone_info['type']), $zone_id);
+        if ($dnsRecord->deleteDomain($zone_id)) {
+            $this->auditLogger->logInfo(sprintf(
+                'client_ip:%s user:%s operation:delete_zone zone:%s zone_type:%s',
+                $this->ipAddressRetriever->getClientIp(),
+                $this->userContextService->getLoggedInUsername(),
+                $zone_info['name'],
+                $zone_info['type']
+            ), $zone_id);
 
-            $this->setMessage('list_zones', 'success', _('Zone has been deleted successfully.'));
-            $this->redirect('index.php', ['page'=> 'list_zones']);
+            // Delete associated comments - wrapped in try-catch to prevent
+            // comment deletion failures from breaking zone deletion
+            try {
+                $this->recordCommentService->deleteCommentsByDomainId($zone_id);
+            } catch (\Exception $e) {
+                $this->logger->error('Failed to delete comments for zone {zone_id}: {error}', ['zone_id' => $zone_id, 'error' => $e->getMessage()]);
+            }
+
+            // Check if the zone is a reverse zone and redirect accordingly
+            if (!empty($zone_info['name']) && DnsHelper::isReverseZone($zone_info['name'])) {
+                $this->setMessage('list_reverse_zones', 'success', _('Zone has been deleted successfully.'));
+                $this->redirect('/zones/reverse');
+            } else {
+                $this->setMessage('list_forward_zones', 'success', _('Zone has been deleted successfully.'));
+                $this->redirect('/zones/forward');
+            }
         }
     }
 
-    private function showDeleteDomain(string $zone_id): void
+    private function showDeleteDomain(int $zone_id): void
     {
         $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-        $zone_info = $dnsRecord->get_zone_info_from_id($zone_id);
-        $zone_owners = UserManager::get_fullnames_owners_from_domainid($this->db, $zone_id);
+        $zone_info = $dnsRecord->getZoneInfoFromId($zone_id);
+        $zone_owners = UserManager::getFullnamesOwnersFromFomainId($this->db, $zone_id);
 
         $slave_master_exists = false;
         if ($zone_info['type'] == 'SLAVE') {
             $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-            $slave_master = $dnsRecord->get_domain_slave_master($zone_id);
-            if ($dnsRecord->supermaster_exists($slave_master)) {
-                $slave_master_exists = true;
+            $slave_master = $dnsRecord->getDomainSlaveMaster($zone_id);
+            if ($slave_master) {
+                // Extract first IP from master field (can contain multiple IPs, hostnames, ports)
+                $master_ip = IpHelper::extractFirstIpFromMaster($slave_master);
+                if ($master_ip && $dnsRecord->supermasterExists($master_ip)) {
+                    $slave_master_exists = true;
+                }
             }
         }
 
         if (str_starts_with($zone_info['name'], "xn--")) {
-            $idn_zone_name = idn_to_utf8($zone_info['name'], IDNA_NONTRANSITIONAL_TO_ASCII);
+            $idn_zone_name = DnsIdnService::toUtf8($zone_info['name']);
         } else {
             $idn_zone_name = "";
         }
@@ -127,6 +175,7 @@ class DeleteDomainController extends BaseController
             'idn_zone_name' => $idn_zone_name,
             'zone_owners' => $zone_owners,
             'slave_master_exists' => $slave_master_exists,
+            'is_reverse_zone' => DnsHelper::isReverseZone($zone_info['name']),
         ]);
     }
 }

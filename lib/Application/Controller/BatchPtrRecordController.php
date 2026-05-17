@@ -1,0 +1,337 @@
+<?php
+
+/*  Poweradmin, a friendly web-based admin tool for PowerDNS.
+ *  See <https://www.poweradmin.org> for more details.
+ *
+ *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
+ *  Copyright 2010-2025 Poweradmin Development Team
+ *
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation, either version 3 of the License, or
+ *  (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+namespace Poweradmin\Application\Controller;
+
+use Exception;
+use Poweradmin\BaseController;
+use Poweradmin\Domain\Model\Permission;
+use Poweradmin\Domain\Model\UserManager;
+use Poweradmin\Domain\Service\BatchReverseRecordCreator;
+use Poweradmin\Domain\Service\DnsIdnService;
+use Poweradmin\Domain\Service\DnsRecord;
+use Poweradmin\Domain\Utility\DnsHelper;
+use Poweradmin\Domain\Utility\IpHelper;
+use Poweradmin\Infrastructure\Logger\LegacyLogger;
+use Symfony\Component\Validator\Constraints as Assert;
+use Poweradmin\Domain\Service\UserContextService;
+use Poweradmin\Domain\Model\Constants;
+
+class BatchPtrRecordController extends BaseController
+{
+    private LegacyLogger $auditLogger;
+    private DnsRecord $dnsRecord;
+    private BatchReverseRecordCreator $batchReverseRecordCreator;
+    private UserContextService $userContextService;
+
+    public function __construct(array $request)
+    {
+        parent::__construct($request);
+
+        $this->auditLogger = new LegacyLogger($this->db);
+        $this->dnsRecord = new DnsRecord($this->db, $this->getConfig());
+
+        $backendProvider = $this->createDnsBackendProvider();
+        $repositoryFactory = $this->getRepositoryFactory($backendProvider);
+        $recordRepository = $repositoryFactory->createRecordRepository();
+
+        $this->batchReverseRecordCreator = new BatchReverseRecordCreator(
+            $this->db,
+            $this->getConfig(),
+            $this->auditLogger,
+            $this->dnsRecord,
+            null,
+            $recordRepository
+        );
+        $this->userContextService = new UserContextService();
+    }
+
+    public function run(): void
+    {
+        // Check if batch PTR records are enabled
+        $isReverseRecordAllowed = $this->config->get('interface', 'add_reverse_record', true);
+        $this->checkCondition(!$isReverseRecordAllowed, _("Batch PTR record creation is not enabled."));
+
+        // Check if user has permission to use this feature
+        $perm_edit_own = UserManager::verifyPermission($this->db, 'zone_content_edit_own');
+        $perm_edit_others = UserManager::verifyPermission($this->db, 'zone_content_edit_others');
+        $this->checkCondition(
+            !$perm_edit_own && !$perm_edit_others,
+            _("You do not have permission to edit DNS records.")
+        );
+
+        // Set the current page for navigation highlighting
+        $this->setCurrentPage('batch_ptr_record');
+        $this->setPageTitle(_('Batch PTR Records'));
+
+        // Check if we have a specific zone_id
+        $hasZoneId = isset($_GET['id']) && !empty($_GET['id']);
+
+        if ($hasZoneId) {
+            $this->checkId();
+            $zone_id = (int)htmlspecialchars($_GET['id']);
+            $zone_type = $this->dnsRecord->getDomainType($zone_id);
+            $zone_name = $this->dnsRecord->getDomainNameById($zone_id);
+            $userId = $this->userContextService->getLoggedInUserId();
+            $user_is_zone_owner = UserManager::verifyUserIsOwnerZoneId($this->db, $zone_id);
+
+            // Check if this is a reverse zone
+            $isReverseZone = DnsHelper::isReverseZone($zone_name);
+            $this->checkCondition($isReverseZone, _("Batch PTR record creation is not available for reverse zones."));
+
+            // Check zone-specific edit permission (includes group permissions)
+            $canEdit = UserManager::canUserPerformZoneAction($this->db, $userId, $zone_id, 'zone_content_edit_own');
+            $canEditAsClient = UserManager::canUserPerformZoneAction($this->db, $userId, $zone_id, 'zone_content_edit_own_as_client');
+            $canEditOthers = UserManager::verifyPermission($this->db, 'zone_content_edit_others');
+
+            $this->checkCondition(
+                $zone_type == "SLAVE" || (!$canEditOthers && !$canEdit && !$canEditAsClient),
+                _("You do not have the permission to add records to this zone.")
+            );
+        }
+
+        // Preserve form data in case of errors
+        $formData = [];
+        if ($this->isPost()) {
+            $formData = $_POST;
+            try {
+                $this->validateCsrfToken();
+                if ($this->addBatchPtrRecords()) {
+                    // Clear form data on success
+                    $formData = [];
+                }
+            } catch (Exception $e) {
+                $this->setMessage('batch_ptr_record', 'error', $e->getMessage());
+                // Keep form data in case of error
+            }
+        }
+
+        $this->showForm($formData);
+    }
+
+    private function addBatchPtrRecords(): bool
+    {
+        $constraints = [
+            'network_type' => [
+                new Assert\NotBlank()
+            ],
+            'network_prefix' => [
+                new Assert\NotBlank()
+            ],
+            'domain' => [
+                new Assert\NotBlank()
+            ]
+        ];
+
+        $this->setValidationConstraints($constraints);
+
+        if (!$this->doValidateRequest($_POST)) {
+            $this->showFirstValidationError($_POST);
+            return false;
+        }
+
+        $networkType = $_POST['network_type'] ?? '';
+        $networkPrefix = $_POST['network_prefix'] ?? '';
+        $hostPrefix = $_POST['host_prefix'] ?? '';
+        $domain = $_POST['domain'] ?? '';
+        $ttl = $this->config->get('dns', 'ttl', 86400);
+        $prio = 0;
+        $comment = $_POST['comment'] ?? '';
+        $zone_id = isset($_GET['id']) ? (int)$_GET['id'] : 0; // Use 0 when no zone_id is provided
+        $ipv6_count = isset($_POST['ipv6_count']) ? (int)$_POST['ipv6_count'] : 256;
+        $createForwardRecords = isset($_POST['create_forward_records']) && $_POST['create_forward_records'] === 'on';
+        $onlyMatchingRecords = isset($_POST['only_matching_records']) && $_POST['only_matching_records'] === 'on';
+
+        try {
+            if ($networkType === 'ipv4') {
+                $result = $this->batchReverseRecordCreator->createIPv4Network(
+                    $networkPrefix,
+                    $hostPrefix,
+                    $domain,
+                    (string)$zone_id,
+                    $ttl,
+                    $prio,
+                    $comment,
+                    $this->userContextService->getLoggedInUsername(),
+                    $createForwardRecords,
+                    $onlyMatchingRecords
+                );
+            } else { // IPv6
+                $result = $this->batchReverseRecordCreator->createIPv6Network(
+                    $networkPrefix,
+                    $hostPrefix,
+                    $domain,
+                    (string)$zone_id,
+                    $ttl,
+                    $prio,
+                    $comment,
+                    $this->userContextService->getLoggedInUsername(),
+                    $ipv6_count,
+                    $createForwardRecords
+                );
+            }
+
+            if ($result['success']) {
+                $this->setMessage('batch_ptr_record', 'success', $result['message']);
+                return true;
+            } else {
+                $this->setMessage('batch_ptr_record', 'error', $result['message']);
+                return false;
+            }
+        } catch (Exception $e) {
+            $this->setMessage('batch_ptr_record', 'error', $e->getMessage());
+            return false;
+        }
+    }
+
+    private function showForm(array $formData = []): void
+    {
+        $hasZoneId = isset($_GET['id']) && !empty($_GET['id']);
+        $file_version = time();
+        $zone_id = "";
+        $zone_name = "";
+        $idn_zone_name = "";
+        $isReverseZone = false;
+        $preFillDomain = "";
+
+        if ($hasZoneId) {
+            $zone_id = (int)htmlspecialchars($_GET['id']);
+            $zone_name = $this->dnsRecord->getDomainNameById($zone_id);
+            $isReverseZone = DnsHelper::isReverseZone($zone_name);
+            $preFillDomain = $zone_name;
+
+            if (str_starts_with($zone_name, "xn--")) {
+                $idn_zone_name = DnsIdnService::toUtf8($zone_name);
+            } else {
+                $idn_zone_name = "";
+            }
+        }
+
+        // Get all reverse zones for the dropdown
+        $reverseZones = $this->getReverseZones();
+
+        $this->render('batch_ptr_record.html', [
+            'network_type' => $formData['network_type'] ?? 'ipv4',
+            'network_prefix' => $formData['network_prefix'] ?? '',
+            'host_prefix' => $formData['host_prefix'] ?? '',
+            'domain' => $formData['domain'] ?? $preFillDomain,
+            'ttl' => $this->config->get('dns', 'ttl', 86400),
+            'ipv6_count' => $formData['ipv6_count'] ?? 256,
+            'comment' => $formData['comment'] ?? '',
+            'create_forward_records' => $formData['create_forward_records'] ?? '',
+            'only_matching_records' => $formData['only_matching_records'] ?? '',
+            'zone_id' => $zone_id,
+            'zone_name' => $zone_name,
+            'idn_zone_name' => $idn_zone_name,
+            'is_reverse_zone' => $isReverseZone,
+            'has_zone_id' => $hasZoneId,
+            'file_version' => $file_version,
+            'iface_record_comments' => $this->config->get('interface', 'show_record_comments', false),
+            'reverse_zones' => $reverseZones,
+        ]);
+    }
+
+    public function checkId(): void
+    {
+        $constraints = [
+            'id' => [
+                new Assert\NotBlank(),
+                new Assert\Type('numeric')
+            ]
+        ];
+
+        $this->setValidationConstraints($constraints);
+
+        if (!$this->doValidateRequest($_GET)) {
+            $this->showFirstValidationError($_GET);
+        }
+    }
+
+    /**
+     * Get all reverse zones for the dropdown
+     *
+     * @return array Array of reverse zones
+     */
+    private function getReverseZones(): array
+    {
+        $zoneRepository = $this->createZoneRepository();
+
+        // Get permission type and user ID
+        $perm_view = Permission::getViewPermission($this->db);
+        $userId = $this->userContextService->getLoggedInUserId();
+
+        // Get all reverse zones (using a high limit to get all zones for the dropdown).
+        // No badges are rendered here, so skip the per-zone SOA-health probe.
+        $reverseZonesResult = $zoneRepository->getReverseZones($perm_view, $userId, 'all', 0, Constants::DEFAULT_MAX_ROWS, 'name', 'ASC', false, false, false, false);
+
+        $reverseZones = [];
+        foreach ($reverseZonesResult as $zone) {
+            // For IPv4 reverse zones, convert to network notation
+            if (str_ends_with($zone['name'], '.in-addr.arpa')) {
+                $parts = explode('.', str_replace('.in-addr.arpa', '', $zone['name']));
+                $octets = array_reverse($parts);
+
+                // Determine CIDR based on number of octets
+                if (count($octets) == 1) {
+                    $network = $octets[0] . '.0.0.0/8';
+                } elseif (count($octets) == 2) {
+                    $network = $octets[0] . '.' . $octets[1] . '.0.0/16';
+                } elseif (count($octets) == 3) {
+                    $network = $octets[0] . '.' . $octets[1] . '.' . $octets[2] . '.0/24';
+                } else {
+                    // For more specific zones, just show the zone name
+                    $network = $zone['name'];
+                }
+
+                $reverseZones[] = [
+                    'name' => $zone['name'],
+                    'network' => $network,
+                    'type' => 'ipv4'
+                ];
+            } elseif (str_ends_with($zone['name'], '.ip6.arpa')) {
+                // Convert ip6.arpa zone to /64 prefix (4 hextets)
+                // The form validation expects exactly 4 colon-separated groups
+                $shortened = IpHelper::shortenIPv6ReverseZone($zone['name']);
+                if ($shortened !== null) {
+                    $binary = inet_pton($shortened);
+                    $expanded = implode(':', str_split(bin2hex($binary), 4));
+                    $hextets = explode(':', $expanded);
+                    // Take first 4 hextets and strip leading zeros for readability
+                    $prefix = array_slice($hextets, 0, 4);
+                    $network = implode(':', array_map(function ($h) {
+                        return ltrim($h, '0') ?: '0';
+                    }, $prefix));
+                } else {
+                    $network = $zone['name'];
+                }
+
+                $reverseZones[] = [
+                    'name' => $zone['name'],
+                    'network' => $network,
+                    'type' => 'ipv6'
+                ];
+            }
+        }
+
+        return $reverseZones;
+    }
+}

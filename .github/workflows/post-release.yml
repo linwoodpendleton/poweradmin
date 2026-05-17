@@ -1,0 +1,79 @@
+name: Post Release Version Bump
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  version-bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.release.target_commitish }}
+
+      - name: Get released version
+        id: released
+        run: |
+          # Remove 'v' prefix from tag
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Released version: $VERSION"
+
+      - name: Calculate next version
+        id: next_version
+        run: |
+          CURRENT="${{ steps.released.outputs.version }}"
+
+          # Always bump patch version after release
+          NEXT=$(echo "$CURRENT" | awk -F. '{print $1"."$2"."$3+1}')
+
+          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "Next development version: $NEXT"
+
+      - name: Resolve branch name
+        id: branch
+        run: |
+          TARGET="${{ github.event.release.target_commitish }}"
+          # If target_commitish is a SHA, resolve the branch name from the tag
+          if [[ "$TARGET" =~ ^[0-9a-f]{40}$ ]]; then
+            BRANCH=$(git branch -r --contains "$TARGET" | grep -v HEAD | head -1 | sed 's|^ *origin/||')
+            if [ -z "$BRANCH" ]; then
+              echo "::error::Could not resolve branch for commit $TARGET"
+              exit 1
+            fi
+          else
+            BRANCH="$TARGET"
+          fi
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "Resolved branch: $BRANCH"
+
+          # Skip protected branches that require PRs
+          if [ "$BRANCH" = "master" ] || [ "$BRANCH" = "main" ]; then
+            echo "::warning::Skipping version bump on protected branch $BRANCH - bump manually"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update version file
+        if: steps.branch.outputs.skip != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Ensure we're on the branch, not detached HEAD
+          git checkout "${{ steps.branch.outputs.name }}"
+
+          # Update version in lib/Version.php
+          sed -i "s/VERSION = '[^']*'/VERSION = '${{ steps.next_version.outputs.version }}'/" lib/Version.php
+
+          git add lib/Version.php
+          git commit -m "chore(release): bump version to ${{ steps.next_version.outputs.version }}"
+          git push origin "${{ steps.branch.outputs.name }}"

@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2026 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -22,96 +22,219 @@
 
 namespace Poweradmin;
 
-use Poweradmin\Application\Presenter\ErrorPresenter;
 use Poweradmin\Application\Service\StatsDisplayService;
-use Poweradmin\Domain\Error\ErrorMessage;
+use Poweradmin\Domain\Service\UserContextService;
+use Poweradmin\Infrastructure\Service\MessageService;
 use Poweradmin\Domain\Utility\MemoryUsage;
 use Poweradmin\Domain\Utility\Timer;
+use Poweradmin\Infrastructure\Configuration\ConfigurationManager;
 use Poweradmin\Infrastructure\Configuration\ConfigValidator;
 use Poweradmin\Infrastructure\Utility\SimpleSizeFormatter;
+use Poweradmin\Infrastructure\Web\BadgeTwigExtension;
+use Poweradmin\Module\ModuleRegistry;
 use Symfony\Bridge\Twig\Extension\TranslationExtension;
+use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Translation\Loader\PoFileLoader;
 use Symfony\Component\Translation\Translator;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 use Twig\Environment;
 use Twig\Error\Error;
 use Twig\Loader\FilesystemLoader;
 
+/**
+ * Class AppManager
+ *
+ * Manages the application configuration, template rendering, and statistics display.
+ */
 class AppManager
 {
+    /** @var Environment $templateRenderer The Twig template renderer */
     protected Environment $templateRenderer;
-    protected AppConfiguration $configuration;
+
+    /** @var ConfigurationManager $configuration The application configuration */
+    protected ConfigurationManager $configuration;
+
+    /** @var StatsDisplayService|null $statsDisplayService The service for displaying statistics */
     protected ?StatsDisplayService $statsDisplayService = null;
 
-    public function __construct()
+    private LoggerInterface $logger;
+
+    /**
+     * AppManager constructor.
+     * Initializes the template renderer, configuration, and optional statistics display service.
+     */
+    public function __construct(?LoggerInterface $logger = null)
     {
-        $loader = new FilesystemLoader('templates');
+        $this->logger = $logger ?? new NullLogger();
+        $this->configuration = ConfigurationManager::getInstance();
+        $this->configuration->initialize();
+
+        $theme_base_path = $this->configuration->get('interface', 'theme_base_path', 'templates');
+        $theme = $this->configuration->get('interface', 'theme', 'default');
+        $theme_path = $theme_base_path . '/' . $theme;
+
+        // Validate theme directory exists, fallback to 'default' if not
+        if (!is_dir($theme_path)) {
+            $this->logger->warning('Theme directory {path} does not exist. Falling back to default theme.', ['path' => $theme_path]);
+
+            // Check if this is a removed legacy theme
+            $removedThemes = ['spark', 'ignite', 'mobile'];
+            if (in_array($theme, $removedThemes)) {
+                $this->logger->warning('The {theme} theme was removed in Poweradmin 4.0. Please update your configuration to use theme: default.', ['theme' => $theme]);
+            }
+
+            // Fallback to default theme
+            $theme = 'default';
+            $theme_path = $theme_base_path . '/' . $theme;
+
+            // If even default doesn't exist, this is a critical error
+            if (!is_dir($theme_path)) {
+                $messageService = new MessageService();
+                $messageService->displayDirectSystemError(
+                    "Critical error: Default theme directory '$theme_path' does not exist. " .
+                    "Please ensure Poweradmin is properly installed."
+                );
+                exit(1);
+            }
+        }
+
+        // Look directly in the theme path for templates, not in subdirectories
+        $loader = new FilesystemLoader([$theme_path]);
+
+        // Register module template paths as Twig namespaces (@module_name/template.html)
+        $registry = new ModuleRegistry($this->configuration);
+        $registry->loadModules();
+
+        foreach ($registry->getEnabledModules() as $module) {
+            $templatePath = $module->getTemplatePath();
+            if (!empty($templatePath) && is_dir($templatePath)) {
+                $loader->addPath($templatePath, $module->getName());
+            }
+        }
+
         $this->templateRenderer = new Environment($loader, ['debug' => false]);
 
-        $this->configuration = new AppConfiguration();
-
-        if ($this->config('display_stats')) {
+        if ($this->configuration->get('misc', 'display_stats', false)) {
             $memoryUsage = new MemoryUsage();
             $timer = new Timer();
             $sizeFormatter = new SimpleSizeFormatter();
             $this->statsDisplayService = new StatsDisplayService($memoryUsage, $timer, $sizeFormatter);
         }
 
+        if ($this->configuration instanceof ConfigurationManager && !$this->configuration->isDefaultsFileLoaded()) {
+            $messageService = new MessageService();
+            $messageService->displayDirectSystemError(sprintf(
+                'Default settings file is missing or unreadable: %s. Please restore it from the Poweradmin distribution before continuing.',
+                htmlspecialchars($this->configuration->getDefaultsFilePath(), ENT_QUOTES)
+            ));
+        }
+
         $validator = new ConfigValidator($this->configuration->getAll());
         $this->showValidationErrors($validator);
 
-        $iface_lang = $this->config('iface_lang');
-        if (isset($_SESSION["userlang"])) {
-            $iface_lang = $_SESSION["userlang"];
+        $userContextService = new UserContextService();
+        $interfaceLang = $this->configuration->get('interface', 'language', 'en_EN');
+        $userLang = $userContextService->getUserLanguage();
+        if ($userLang !== null) {
+            $interfaceLang = $userLang;
         }
 
-        $translator = new Translator($iface_lang);
+        // Allow language override via GET parameter (login page language switcher)
+        $request = Request::createFromGlobals();
+        $requestedLang = $request->query->get('lang');
+        if (is_string($requestedLang) && preg_match('/^[a-zA-Z_]+$/', $requestedLang)) {
+            $enabledLanguages = $this->configuration->get('interface', 'enabled_languages', 'en_EN') ?? 'en_EN';
+            $supportedLocales = explode(',', $enabledLanguages);
+            if (in_array($requestedLang, $supportedLocales, true)) {
+                $interfaceLang = $requestedLang;
+            }
+        }
+
+        $translator = new Translator($interfaceLang);
         $translator->addLoader('po', new PoFileLoader());
-        $translator->addResource('po', $this->getLocaleFile($iface_lang), $iface_lang);
+        $translator->addResource('po', $this->getLocaleFile($interfaceLang), $interfaceLang);
+
+        // Load module translations
+        foreach ($registry->getEnabledModules() as $module) {
+            $localePath = $module->getLocalePath();
+            if (empty($localePath)) {
+                continue;
+            }
+
+            $moduleLocaleFile = $localePath . '/' . $interfaceLang . '/messages.po';
+            if (file_exists($moduleLocaleFile)) {
+                $translator->addResource('po', $moduleLocaleFile, $interfaceLang);
+            }
+        }
 
         $this->templateRenderer->addExtension(new TranslationExtension($translator));
+        $this->templateRenderer->addExtension(new BadgeTwigExtension());
     }
 
-    public function render($template, $params = []): void
+    /**
+     * Renders a template with the given parameters.
+     *
+     * @param string $template The template file to render
+     * @param array $params The parameters to pass to the template
+     */
+    public function render(string $template, array $params = []): void
     {
         try {
             echo $this->templateRenderer->render($template, $params);
         } catch (Error $e) {
-            die($e->getMessage());
+            $this->logger->error('Template rendering failed: {error}', ['error' => $e->getMessage()]);
+            $messageService = new MessageService();
+            $messageService->displayDirectSystemError('An error occurred while rendering the template. Please check the server logs for details.');
         }
     }
 
-    public function getConfig(): AppConfiguration
+    /**
+     * Gets the locale file path for the given interface language.
+     *
+     * @param string $interfaceLang The interface language
+     * @return string The path to the locale file
+     */
+    public function getLocaleFile(string $interfaceLang): string
     {
-        return $this->configuration;
-    }
-
-    public function config($name): mixed
-    {
-        return $this->configuration->get($name);
-    }
-
-    public function getLocaleFile(string $iface_lang): string
-    {
-        $supportedLocales = explode(',', $this->config('iface_enabled_languages'));
-        if (in_array($iface_lang, $supportedLocales)) {
-            return "locale/$iface_lang/LC_MESSAGES/messages.po";
+        $supportedLocales = explode(',', $this->configuration->get('interface', 'enabled_languages', 'en_EN'));
+        if (in_array($interfaceLang, $supportedLocales)) {
+            return "locale/$interfaceLang/LC_MESSAGES/messages.po";
         }
         return "locale/en_EN/LC_MESSAGES/messages.po";
     }
 
+    /**
+     * Displays validation errors if the configuration is invalid.
+     *
+     * @param ConfigValidator $validator The configuration validator
+     */
     public function showValidationErrors(ConfigValidator $validator): void
     {
         if (!$validator->validate()) {
             $errors = $validator->getErrors();
-            foreach ($errors as $error) {
-                $error = new ErrorMessage("Invalid configuration: $error");
-                $errorPresenter = new ErrorPresenter();
-                $errorPresenter->present($error);
+            $messageService = new MessageService();
+
+            // If there's only one error, display it directly
+            if (count($errors) === 1) {
+                $firstKey = array_key_first($errors);
+                $messageService->displayDirectSystemError("Invalid configuration: " . $errors[$firstKey]);
+            } elseif (count($errors) > 1) {
+                $errorMessage = "Invalid configuration:<ul>";
+                foreach ($errors as $error) {
+                    $errorMessage .= "<li>" . htmlspecialchars($error, ENT_QUOTES) . "</li>";
+                }
+                $errorMessage .= "</ul>";
+                $messageService->displayDirectSystemError($errorMessage);
             }
-            exit(1);
         }
     }
 
+    /**
+     * Displays the application statistics.
+     *
+     * @return string The statistics display
+     */
     public function displayStats(): string
     {
         if ($this->statsDisplayService !== null) {

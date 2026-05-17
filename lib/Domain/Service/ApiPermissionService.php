@@ -1,0 +1,552 @@
+<?php
+
+/*  Poweradmin, a friendly web-based admin tool for PowerDNS.
+ *  See <https://www.poweradmin.org> for more details.
+ *
+ *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
+ *  Copyright 2010-2025 Poweradmin Development Team
+ *
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation, either version 3 of the License, or
+ *  (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+namespace Poweradmin\Domain\Service;
+
+use PDO;
+
+/**
+ * Stateless permission service for API requests
+ * Does not rely on session data - all checks use explicit user IDs
+ *
+ * @package Poweradmin\Domain\Service
+ */
+class ApiPermissionService
+{
+    private PDO $db;
+
+    public function __construct(PDO $db)
+    {
+        $this->db = $db;
+    }
+
+    /**
+     * Check if user has a specific permission (stateless)
+     *
+     * @param int $userId User ID to check
+     * @param string $permissionName Permission name
+     * @return bool True if user has permission
+     */
+    public function userHasPermission(int $userId, string $permissionName): bool
+    {
+        $stmt = $this->db->prepare("
+            SELECT COUNT(*) FROM (
+                SELECT perm_items.id
+                FROM perm_templ_items
+                INNER JOIN perm_items ON perm_templ_items.perm_id = perm_items.id
+                INNER JOIN users ON perm_templ_items.templ_id = users.perm_templ
+                WHERE users.id = :user_id
+                AND perm_items.name = :permission_name
+
+                UNION
+
+                SELECT pi.id
+                FROM user_group_members ugm
+                INNER JOIN user_groups ug ON ugm.group_id = ug.id
+                INNER JOIN perm_templ pt ON ug.perm_templ = pt.id
+                INNER JOIN perm_templ_items pti ON pt.id = pti.templ_id
+                INNER JOIN perm_items pi ON pti.perm_id = pi.id
+                WHERE ugm.user_id = :user_id2
+                AND pi.name = :permission_name2
+            ) AS combined
+        ");
+
+        $stmt->execute([
+            ':user_id' => $userId,
+            ':permission_name' => $permissionName,
+            ':user_id2' => $userId,
+            ':permission_name2' => $permissionName
+        ]);
+
+        return (bool)$stmt->fetchColumn();
+    }
+
+    /**
+     * Return the group IDs the user is a member of.
+     *
+     * @return array<int, int>
+     */
+    public function getUserGroupIds(int $userId): array
+    {
+        $stmt = $this->db->prepare(
+            'SELECT group_id FROM user_group_members WHERE user_id = :user_id'
+        );
+        $stmt->execute([':user_id' => $userId]);
+
+        $rows = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        return array_map('intval', $rows ?: []);
+    }
+
+    /**
+     * Given a list of group IDs, return the subset that actually exists in user_groups.
+     *
+     * @param array<int> $groupIds
+     * @return array<int, int>
+     */
+    public function getExistingGroupIds(array $groupIds): array
+    {
+        if (empty($groupIds)) {
+            return [];
+        }
+        $placeholders = implode(',', array_fill(0, count($groupIds), '?'));
+        $stmt = $this->db->prepare("SELECT id FROM user_groups WHERE id IN ($placeholders)");
+        $stmt->execute(array_values($groupIds));
+        $rows = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        return array_map('intval', $rows ?: []);
+    }
+
+    /**
+     * Check if user is the owner of a specific zone (stateless)
+     *
+     * Checks both direct ownership (zones.owner) and group membership
+     * (zones_groups + user_group_members), matching the web UI behavior.
+     *
+     * @param int $userId User ID to check
+     * @param int $zoneId Zone ID (domain_id in PowerDNS)
+     * @return bool True if user owns the zone (directly or via group)
+     */
+    public function userOwnsZone(int $userId, int $zoneId): bool
+    {
+        // Check direct ownership
+        $stmt = $this->db->prepare("
+            SELECT COUNT(*)
+            FROM zones
+            WHERE zones.owner = :user_id
+            AND zones.domain_id = :zone_id
+        ");
+
+        $stmt->execute([
+            ':user_id' => $userId,
+            ':zone_id' => $zoneId
+        ]);
+
+        if ((bool)$stmt->fetchColumn()) {
+            return true;
+        }
+
+        // Check group ownership
+        $stmt = $this->db->prepare("
+            SELECT COUNT(*)
+            FROM zones_groups zg
+            INNER JOIN user_group_members ugm ON zg.group_id = ugm.group_id
+            WHERE ugm.user_id = :user_id AND zg.domain_id = :zone_id
+        ");
+
+        $stmt->execute([
+            ':user_id' => $userId,
+            ':zone_id' => $zoneId
+        ]);
+
+        return (bool)$stmt->fetchColumn();
+    }
+
+    /**
+     * Check if user can view a specific zone (stateless)
+     *
+     * @param int $userId User ID to check
+     * @param int $zoneId Zone ID (domain_id in PowerDNS)
+     * @return bool True if user can view the zone
+     */
+    public function canViewZone(int $userId, int $zoneId): bool
+    {
+        // Uberuser can view all zones
+        if ($this->userHasPermission($userId, 'user_is_ueberuser')) {
+            return true;
+        }
+
+        // User with zone_content_view_others can view all zones
+        if ($this->userHasPermission($userId, 'zone_content_view_others')) {
+            return true;
+        }
+
+        // User with zone_content_view_own can view their own zones
+        if ($this->userHasPermission($userId, 'zone_content_view_own')) {
+            return $this->userOwnsZone($userId, $zoneId);
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if user can edit a specific zone (stateless)
+     *
+     * @param int $userId User ID to check
+     * @param int $zoneId Zone ID (domain_id in PowerDNS)
+     * @return bool True if user can edit the zone
+     */
+    public function canEditZone(int $userId, int $zoneId): bool
+    {
+        // Uberuser can edit all zones
+        if ($this->userHasPermission($userId, 'user_is_ueberuser')) {
+            return true;
+        }
+
+        // User with zone_content_edit_others can edit all zones
+        if ($this->userHasPermission($userId, 'zone_content_edit_others')) {
+            return true;
+        }
+
+        // User with zone_content_edit_own can edit their own zones
+        if ($this->userHasPermission($userId, 'zone_content_edit_own')) {
+            return $this->userOwnsZone($userId, $zoneId);
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if user can edit records (content) inside a specific zone (stateless)
+     *
+     * Broader than canEditZone(): also accepts zone_content_edit_own_as_client, which
+     * is restricted to record edits and must NOT grant zone-level metadata changes
+     * (name/type/master). Zone-level updates remain gated by canEditZone().
+     *
+     * Record-type restrictions for own_as_client (SOA, NS) are enforced by
+     * canEditZoneRecord().
+     *
+     * SLAVE zones cannot be content-edited via Poweradmin (records are owned by
+     * the master); pass the zone type from the caller to enforce this in the
+     * API write paths that bypass RecordManager. ApiPermissionService never
+     * queries PowerDNS tables itself, so the zone type must be supplied.
+     *
+     * @param int $userId User ID to check
+     * @param int $zoneId Zone ID (domain_id in PowerDNS)
+     * @param string|null $zoneType Zone type (MASTER, SLAVE, NATIVE) when known
+     * @return bool True if user can edit records in the zone
+     */
+    public function canEditZoneContent(int $userId, int $zoneId, ?string $zoneType = null): bool
+    {
+        if ($zoneType !== null && strtoupper($zoneType) === 'SLAVE') {
+            return false;
+        }
+
+        if ($this->canEditZone($userId, $zoneId)) {
+            return true;
+        }
+
+        if ($this->userHasPermission($userId, 'zone_content_edit_own_as_client')) {
+            return $this->userOwnsZone($userId, $zoneId);
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if user can edit a specific record type within a zone (stateless)
+     *
+     * Mirrors the web UI behavior in RecordManager: users holding only
+     * zone_content_edit_own_as_client may edit records in their own zones except
+     * for SOA and NS records, which require zone_content_edit_own (or higher).
+     * SLAVE zones are rejected outright (when $zoneType is provided) so API
+     * create paths that bypass RecordManager keep the same restriction as the UI.
+     *
+     * @param int $userId User ID to check
+     * @param int $zoneId Zone ID (domain_id in PowerDNS)
+     * @param string $recordType DNS record type (e.g. "A", "TXT", "SOA", "NS")
+     * @param string|null $zoneType Zone type (MASTER, SLAVE, NATIVE) when known
+     * @return bool True if user can edit records of this type in this zone
+     */
+    public function canEditZoneRecord(int $userId, int $zoneId, string $recordType, ?string $zoneType = null): bool
+    {
+        if (!$this->canEditZoneContent($userId, $zoneId, $zoneType)) {
+            return false;
+        }
+
+        $restrictedTypes = ['SOA', 'NS'];
+        if (!in_array(strtoupper($recordType), $restrictedTypes, true)) {
+            return true;
+        }
+
+        // SOA/NS edits require a stronger permission than own_as_client
+        return $this->canEditZone($userId, $zoneId);
+    }
+
+    /**
+     * Check if user can delete a specific zone (stateless)
+     *
+     * @param int $userId User ID to check
+     * @param int $zoneId Zone ID (domain_id in PowerDNS)
+     * @return bool True if user can delete the zone
+     */
+    public function canDeleteZone(int $userId, int $zoneId): bool
+    {
+        // Uberuser can delete all zones
+        if ($this->userHasPermission($userId, 'user_is_ueberuser')) {
+            return true;
+        }
+
+        // Check delete permissions
+        if ($this->userHasPermission($userId, 'zone_delete_others')) {
+            return true;
+        }
+
+        if ($this->userHasPermission($userId, 'zone_delete_own')) {
+            return $this->userOwnsZone($userId, $zoneId);
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if user can create zones (stateless)
+     *
+     * @param int $userId User ID to check
+     * @param string $zoneType Zone type (MASTER, SLAVE, NATIVE)
+     * @return bool True if user can create zones of this type
+     */
+    public function canCreateZone(int $userId, string $zoneType = 'MASTER'): bool
+    {
+        // Uberuser can create all zone types
+        if ($this->userHasPermission($userId, 'user_is_ueberuser')) {
+            return true;
+        }
+
+        // Check specific permissions based on zone type
+        $zoneType = strtoupper($zoneType);
+
+        if ($zoneType === 'MASTER' || $zoneType === 'NATIVE') {
+            return $this->userHasPermission($userId, 'zone_master_add');
+        }
+
+        if ($zoneType === 'SLAVE') {
+            return $this->userHasPermission($userId, 'zone_slave_add');
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if user can view other users (stateless)
+     *
+     * @param int $userId User ID to check
+     * @param int $targetUserId Target user ID being viewed
+     * @return bool True if user can view the target user
+     */
+    public function canViewUser(int $userId, int $targetUserId): bool
+    {
+        // Uberuser can view all users
+        if ($this->userHasPermission($userId, 'user_is_ueberuser')) {
+            return true;
+        }
+
+        // User can view their own details
+        if ($userId === $targetUserId) {
+            return true;
+        }
+
+        // User with user_view_others can view all users
+        if ($this->userHasPermission($userId, 'user_view_others')) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if user can edit another user (stateless)
+     *
+     * @param int $userId User ID to check
+     * @param int $targetUserId Target user ID being edited
+     * @return bool True if user can edit the target user
+     */
+    public function canEditUser(int $userId, int $targetUserId): bool
+    {
+        // Uberuser can edit all users
+        if ($this->userHasPermission($userId, 'user_is_ueberuser')) {
+            return true;
+        }
+
+        // User can edit their own details with user_edit_own
+        if ($userId === $targetUserId && $this->userHasPermission($userId, 'user_edit_own')) {
+            return true;
+        }
+
+        // User with user_edit_others can edit all users
+        if ($this->userHasPermission($userId, 'user_edit_others')) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if user can create new users (stateless)
+     *
+     * @param int $userId User ID to check
+     * @return bool True if user can create users
+     */
+    public function canCreateUser(int $userId): bool
+    {
+        // Uberuser can create users
+        if ($this->userHasPermission($userId, 'user_is_ueberuser')) {
+            return true;
+        }
+
+        // User with user_add_new can create users
+        return $this->userHasPermission($userId, 'user_add_new');
+    }
+
+    /**
+     * Check if user can delete another user (stateless)
+     *
+     * @param int $userId User ID to check
+     * @param int $targetUserId Target user ID being deleted
+     * @return bool True if user can delete the target user
+     */
+    public function canDeleteUser(int $userId, int $targetUserId): bool
+    {
+        // Uberuser can delete users (except themselves - business logic check elsewhere)
+        if ($this->userHasPermission($userId, 'user_is_ueberuser')) {
+            return true;
+        }
+
+        // User with user_edit_others can delete users (except themselves)
+        if ($userId !== $targetUserId && $this->userHasPermission($userId, 'user_edit_others')) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if user can edit permission templates (stateless)
+     *
+     * @param int $userId User ID to check
+     * @return bool True if user can edit permission templates
+     */
+    public function canEditPermissionTemplates(int $userId): bool
+    {
+        // Uberuser can edit permission templates
+        if ($this->userHasPermission($userId, 'user_is_ueberuser')) {
+            return true;
+        }
+
+        // User with user_edit_templ_perm can edit permission templates
+        return $this->userHasPermission($userId, 'user_edit_templ_perm');
+    }
+
+    /**
+     * Check if user can list all users (stateless)
+     *
+     * @param int $userId User ID to check
+     * @return bool True if user can list users
+     */
+    public function canListUsers(int $userId): bool
+    {
+        // Uberuser can list all users
+        if ($this->userHasPermission($userId, 'user_is_ueberuser')) {
+            return true;
+        }
+
+        // User with user_view_others can list users
+        return $this->userHasPermission($userId, 'user_view_others');
+    }
+
+    /**
+     * Check if user can create zone templates (stateless)
+     *
+     * @param int $userId User ID to check
+     * @return bool True if user can create zone templates
+     */
+    public function canCreateZoneTemplate(int $userId): bool
+    {
+        if ($this->userHasPermission($userId, 'user_is_ueberuser')) {
+            return true;
+        }
+
+        return $this->userHasPermission($userId, 'zone_templ_add');
+    }
+
+    /**
+     * Check if user can edit zone templates (stateless)
+     *
+     * @param int $userId User ID to check
+     * @return bool True if user can edit zone templates
+     */
+    public function canEditZoneTemplate(int $userId): bool
+    {
+        if ($this->userHasPermission($userId, 'user_is_ueberuser')) {
+            return true;
+        }
+
+        return $this->userHasPermission($userId, 'zone_templ_edit');
+    }
+
+    /**
+     * Check if user can edit zone metadata (ownership, etc.) (stateless)
+     *
+     * @param int $userId User ID to check
+     * @param int $zoneId Zone ID (domain_id in PowerDNS)
+     * @return bool True if user can edit zone metadata
+     */
+    public function canEditZoneMeta(int $userId, int $zoneId): bool
+    {
+        if ($this->userHasPermission($userId, 'user_is_ueberuser')) {
+            return true;
+        }
+
+        if ($this->userHasPermission($userId, 'zone_meta_edit_others')) {
+            return true;
+        }
+
+        if ($this->userHasPermission($userId, 'zone_meta_edit_own')) {
+            return $this->userOwnsZone($userId, $zoneId);
+        }
+
+        return false;
+    }
+
+    /**
+     * Get all zone IDs that the user is allowed to view (stateless)
+     *
+     * @param int $userId User ID to check
+     * @return int[]|null Array of zone IDs the user can view, or null if user can view all zones
+     */
+    public function getUserVisibleZoneIds(int $userId): ?array
+    {
+        // Uberuser can view all zones
+        if ($this->userHasPermission($userId, 'user_is_ueberuser')) {
+            return null; // null = all zones
+        }
+
+        // User with zone_content_view_others can view all zones
+        if ($this->userHasPermission($userId, 'zone_content_view_others')) {
+            return null; // null = all zones
+        }
+
+        // User with zone_content_view_own can view only their own zones (direct + group)
+        if ($this->userHasPermission($userId, 'zone_content_view_own')) {
+            $stmt = $this->db->prepare("
+                SELECT domain_id FROM zones WHERE owner = :user_id
+                UNION
+                SELECT zg.domain_id FROM zones_groups zg
+                INNER JOIN user_group_members ugm ON zg.group_id = ugm.group_id
+                WHERE ugm.user_id = :user_id2
+            ");
+            $stmt->execute([':user_id' => $userId, ':user_id2' => $userId]);
+            return $stmt->fetchAll(\PDO::FETCH_COLUMN);
+        }
+
+        // No view permissions - return empty array
+        return [];
+    }
+}

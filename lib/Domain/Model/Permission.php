@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -22,7 +22,7 @@
 
 namespace Poweradmin\Domain\Model;
 
-use Poweradmin\Infrastructure\Database\PDOLayer;
+use PDO;
 
 /**
  * Class Permission
@@ -40,9 +40,9 @@ class Permission
      */
     public static function getViewPermission($db): string
     {
-        if (UserManager::verify_permission($db, 'zone_content_view_others')) {
+        if (UserManager::verifyPermission($db, 'zone_content_view_others')) {
             return "all";
-        } elseif (UserManager::verify_permission($db, 'zone_content_view_own')) {
+        } elseif (UserManager::verifyPermission($db, 'zone_content_view_own')) {
             return "own";
         } else {
             return "none";
@@ -58,12 +58,31 @@ class Permission
      */
     public static function getEditPermission($db): string
     {
-        if (UserManager::verify_permission($db,'zone_content_edit_others')) {
+        if (UserManager::verifyPermission($db, 'zone_content_edit_others')) {
             return "all";
-        } elseif (UserManager::verify_permission($db,'zone_content_edit_own')) {
+        } elseif (UserManager::verifyPermission($db, 'zone_content_edit_own')) {
             return "own";
-        } elseif (UserManager::verify_permission($db, 'zone_content_edit_own_as_client')) {
+        } elseif (UserManager::verifyPermission($db, 'zone_content_edit_own_as_client')) {
             return "own_as_client";
+        } else {
+            return "none";
+        }
+    }
+
+    /**
+     * Get delete permission.
+     *
+     * This method determines the user's permission to delete zones.
+     *
+     * @param PDO $db The database connection.
+     * @return string Returns "all", "own", or "none" depending on the user's delete permission.
+     */
+    public static function getDeletePermission(PDO $db): string
+    {
+        if (UserManager::verifyPermission($db, 'zone_delete_others')) {
+            return "all";
+        } elseif (UserManager::verifyPermission($db, 'zone_delete_own')) {
+            return "own";
         } else {
             return "none";
         }
@@ -74,16 +93,16 @@ class Permission
      *
      * This method checks a set of permissions for the user.
      *
-     * @param PDOLayer $db The database connection.
+     * @param PDO $db The database connection.
      * @param array $permissions An array containing the permission keys to check.
      * @return array An associative array containing the permission key and its corresponding boolean value.
      */
-    public static function getPermissions(PDOLayer $db, array $permissions): array
+    public static function getPermissions(PDO $db, array $permissions): array
     {
         $result = [];
 
         foreach ($permissions as $permissionName) {
-            $result[$permissionName] = UserManager::verify_permission($db, $permissionName);
+            $result[$permissionName] = UserManager::verifyPermission($db, $permissionName);
         }
 
         return $result;

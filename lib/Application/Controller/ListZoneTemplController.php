@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -25,7 +25,7 @@
  *
  * @package     Poweradmin
  * @copyright   2007-2010 Rejo Zenger <rejo@zenger.nl>
- * @copyright   2010-2024 Poweradmin Development Team
+ * @copyright   2010-2025 Poweradmin Development Team
  * @license     https://opensource.org/licenses/GPL-3.0 GPL
  */
 
@@ -34,29 +34,74 @@ namespace Poweradmin\Application\Controller;
 use Poweradmin\BaseController;
 use Poweradmin\Domain\Model\UserManager;
 use Poweradmin\Domain\Model\ZoneTemplate;
+use Poweradmin\Domain\Service\UserContextService;
+use Poweradmin\Domain\Service\ZoneTemplateSyncService;
+use Poweradmin\Infrastructure\Database\DbCompat;
 
 class ListZoneTemplController extends BaseController
 {
+    private UserContextService $userContext;
+
+    public function __construct(array $request)
+    {
+        parent::__construct($request);
+        $this->userContext = new UserContextService();
+    }
 
     public function run(): void
     {
-        $this->checkPermission('zone_master_add', _("You do not have the permission to edit zone templates."));
+        // Only users with zone_templ_add or zone_templ_edit permission can view zone templates
+        $hasPermission = UserManager::verifyPermission($this->db, 'zone_templ_add') ||
+                         UserManager::verifyPermission($this->db, 'zone_templ_edit') ||
+                         UserManager::verifyPermission($this->db, 'user_is_ueberuser');
+
+        $this->checkCondition(!$hasPermission, _("You do not have the permission to view zone templates."));
+
+        // Set the current page for navigation highlighting
+        $this->setCurrentPage('list_zone_templ');
+        $this->setPageTitle(_('Zone Templates'));
 
         $this->showListZoneTempl();
     }
 
     private function showListZoneTempl(): void
     {
-        $perm_zone_master_add = UserManager::verify_permission($this->db, 'zone_master_add');
+        $perm_zone_templ_add = UserManager::verifyPermission($this->db, 'zone_templ_add');
+        $userId = $this->userContext->getLoggedInUserId();
+        $userName = $this->userContext->getLoggedInUsername();
 
         $zone_templates = new ZoneTemplate($this->db, $this->getConfig());
-        $zone_templates->get_list_zone_templ($_SESSION['userid']);
+        $templatesList = $zone_templates->getListZoneTempl($userId);
+
+        // Get sync status for all templates
+        $syncService = new ZoneTemplateSyncService($this->db, $this->getConfig(), $this->createDnsBackendProvider());
+        $syncStatus = $syncService->getTemplateSyncStatus($userId);
+
+        // PostgreSQL returns booleans as 't'/'f' strings, which Twig treats
+        // as truthy. Normalize via boolFromDb so templates can rely on 0/1.
+        foreach ($templatesList as &$row) {
+            $row['is_default'] = DbCompat::boolFromDb($row['is_default'] ?? 0);
+        }
+        unset($row);
+
+        $effectiveDefaultId = $zone_templates->getDefaultTemplateId();
+        $hasDbDefault = false;
+        foreach ($templatesList as $row) {
+            if ($row['is_default'] === 1) {
+                $hasDbDefault = true;
+                break;
+            }
+        }
 
         $this->render('list_zone_templ.html', [
-            'perm_zone_master_add' => $perm_zone_master_add,
-            'user_name' => UserManager::get_fullname_from_userid($this->db, $_SESSION['userid']) ?: $_SESSION['userlogin'],
-            'zone_templates' => $zone_templates->get_list_zone_templ($_SESSION['userid']),
-            'perm_is_godlike' => UserManager::verify_permission($this->db, 'user_is_ueberuser'),
+            'perm_zone_templ_add' => $perm_zone_templ_add,
+            'perm_zone_templ_edit' => UserManager::verifyPermission($this->db, 'zone_templ_edit'),
+            'user_name' => UserManager::getFullnameFromUserId($this->db, $userId) ?: $userName,
+            'zone_templates' => $templatesList,
+            'sync_status' => $syncStatus,
+            'perm_is_godlike' => UserManager::verifyPermission($this->db, 'user_is_ueberuser'),
+            'effective_default_id' => $effectiveDefaultId,
+            'has_db_default' => $hasDbDefault,
         ]);
     }
 }

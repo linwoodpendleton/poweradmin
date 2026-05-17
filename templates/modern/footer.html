@@ -1,0 +1,185 @@
+</main>
+{% if custom_footer or not user_logged_in %}
+<footer class="footer py-3">
+    <div class="container">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                {% if custom_footer %}
+                {% include ('custom/footer.html') %}
+                {% elseif not user_logged_in %}
+                <!-- Default branding for non-authenticated users -->
+                <a href="https://www.poweradmin.org/">a complete(r) <strong>Poweradmin</strong>
+                    {% if version %}
+                    v{{ version }}
+                    {% endif %}
+                </a>
+                {% endif %}
+            </div>
+            {% if not user_logged_in %}
+            <div>
+                {% if show_style_switcher %}
+                <button class="btn btn-outline-secondary btn-sm" id="style-switcher">
+                    <i class="bi" id="style-icon"></i>
+                </button>
+                {% endif %}
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</footer>
+{% endif %}
+
+
+{% if db_queries %}
+<div class="container pt-3 pb-3">
+    <code>
+        {% for query in db_queries %}
+        {{ query }}<br>
+        {% endfor %}
+    </code>
+</div>
+{% endif %}
+{% if display_stats %}
+{{ display_stats | raw }}
+{% endif %}
+<script src="{{ base_url_prefix }}/vendor/twbs/bootstrap/dist/js/bootstrap.bundle.min.js"></script>
+
+<script>
+    const tooltipTriggerList = document.querySelectorAll('[data-bs-toggle="tooltip"]');
+    const tooltipList = [...tooltipTriggerList].map(tooltipTriggerEl => new bootstrap.Tooltip(tooltipTriggerEl));
+
+    (function () {
+        'use strict'
+
+        const forms = document.querySelectorAll('.needs-validation');
+
+        Array.prototype.slice.call(forms)
+            .forEach(function (form) {
+                form.addEventListener('submit', function (event) {
+                    if (!form.checkValidity()) {
+                        event.preventDefault()
+                        event.stopPropagation()
+                    }
+
+                    form.classList.add('was-validated')
+                }, false)
+            })
+    })()
+
+    const alertList = document.querySelectorAll('.alert')
+    const alerts = [...alertList].map(element => new bootstrap.Alert(element))
+
+    // Theme switcher functionality (only if element exists)
+    const styleSwitcher = document.getElementById('style-switcher');
+    if (styleSwitcher) {
+        const styleIcon = document.getElementById('style-icon');
+        const styleStylesheet = document.getElementById('theme-stylesheet');
+        const customStylesheet = document.getElementById('custom-theme-stylesheet');
+        const ifaceStyle = '{{ iface_style }}';
+
+        let currentStyle = localStorage.getItem('style');
+        if (currentStyle !== 'light' && currentStyle !== 'dark') {
+            currentStyle = ifaceStyle || 'light';
+        }
+
+        function initializeStyle() {
+            // Stylesheet is already loaded correctly from header, just set icon and body class
+            document.body.classList.add(currentStyle);
+            styleIcon.classList.add(currentStyle === 'light' ? 'bi-moon' : 'bi-sun');
+            // Note: stylesheets are already loaded correctly from header script
+        }
+
+        styleSwitcher.addEventListener('click', () => {
+            const newStyle = currentStyle === 'light' ? 'dark' : 'light';
+            document.body.classList.replace(currentStyle, newStyle);
+            styleIcon.classList.replace(currentStyle === 'light' ? 'bi-moon' : 'bi-sun', newStyle === 'light' ? 'bi-moon' : 'bi-sun');
+            styleStylesheet.href = `{{ base_url_prefix }}/{{ theme_base_path }}/{{ theme }}/style/${newStyle}.css?time={{ file_version }}`;
+            // Update custom stylesheet if it exists
+            if (customStylesheet) {
+                customStylesheet.href = `{{ base_url_prefix }}/{{ theme_base_path }}/{{ theme }}/style/custom_${newStyle}.css?time={{ file_version }}`;
+            }
+            localStorage.setItem('style', newStyle);
+            currentStyle = newStyle;
+        });
+
+        initializeStyle();
+    }
+
+    // Sidebar section toggle (no Bootstrap collapse - instant, no flicker)
+    document.querySelectorAll('.sidebar .nav-section-header[role="button"]').forEach(function(header) {
+        header.addEventListener('click', function() {
+            var target = document.querySelector(header.getAttribute('data-bs-target'));
+            if (target) {
+                var isShown = target.classList.toggle('show');
+                header.setAttribute('aria-expanded', isShown);
+            }
+        });
+    });
+
+    // Mobile sidebar toggle functionality
+    document.addEventListener('DOMContentLoaded', function() {
+        const sidebarToggleButtons = document.querySelectorAll('.sidebar-toggle');
+        const sidebarCloseButtons = document.querySelectorAll('.sidebar-close');
+        const sidebar = document.getElementById('sidebarNav');
+        const sidebarContent = document.getElementById('sidebarContent');
+
+        // Handle sidebar toggle buttons (hamburger menu)
+        sidebarToggleButtons.forEach(function(button) {
+            button.addEventListener('click', function() {
+                // Toggle Bootstrap collapse
+                const bsCollapse = new bootstrap.Collapse(sidebarContent, {
+                    toggle: false
+                });
+                
+                if (sidebarContent.classList.contains('show')) {
+                    bsCollapse.hide();
+                } else {
+                    bsCollapse.show();
+                }
+                
+                // Also toggle sidebar visibility on mobile
+                sidebar.classList.toggle('show');
+            });
+        });
+
+        // Handle sidebar close buttons (X button)
+        sidebarCloseButtons.forEach(function(button) {
+            button.addEventListener('click', function() {
+                // Close the sidebar
+                const bsCollapse = new bootstrap.Collapse(sidebarContent, {
+                    toggle: false
+                });
+                bsCollapse.hide();
+                sidebar.classList.remove('show');
+            });
+        });
+
+        // Close sidebar when clicking outside on mobile
+        document.addEventListener('click', function(event) {
+            const isClickInsideSidebar = sidebar.contains(event.target);
+            const isToggleButton = event.target.closest('.sidebar-toggle');
+            
+            if (!isClickInsideSidebar && !isToggleButton && window.innerWidth < 768) {
+                sidebar.classList.remove('show');
+                const bsCollapse = new bootstrap.Collapse(sidebarContent, {
+                    toggle: false
+                });
+                bsCollapse.hide();
+            }
+        });
+
+        // Handle window resize
+        window.addEventListener('resize', function() {
+            if (window.innerWidth >= 768) {
+                sidebar.classList.remove('show');
+                // Ensure sidebar content is visible on desktop
+                const bsCollapse = new bootstrap.Collapse(sidebarContent, {
+                    toggle: false
+                });
+                bsCollapse.show();
+            }
+        });
+    });
+</script>
+</body>
+</html>

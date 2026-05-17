@@ -1,0 +1,417 @@
+<?php
+
+/*  Poweradmin, a friendly web-based admin tool for PowerDNS.
+ *  See <https://www.poweradmin.org> for more details.
+ *
+ *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
+ *  Copyright 2010-2025 Poweradmin Development Team
+ *
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation, either version 3 of the License, or
+ *  (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+namespace Poweradmin\Application\Controller;
+
+use DateTime;
+use Exception;
+use Poweradmin\BaseController;
+use Poweradmin\Domain\Model\UserManager;
+use Poweradmin\Domain\Repository\ApiKeyRepositoryInterface;
+use Poweradmin\Domain\Service\ApiKeyService;
+use Poweradmin\Infrastructure\Logger\LegacyLogger;
+use Poweradmin\Infrastructure\Repository\DbApiKeyRepository;
+use Poweradmin\Infrastructure\Utility\IpAddressRetriever;
+
+/**
+ * Controller for managing API keys
+ *
+ * @package Poweradmin\Application\Controller
+ */
+class ApiKeysController extends BaseController
+{
+    private ApiKeyService $apiKeyService;
+    private ApiKeyRepositoryInterface $apiKeyRepository;
+    private LegacyLogger $auditLogger;
+    private IpAddressRetriever $ipAddressRetriever;
+
+    /**
+     * Constructor
+     *
+     * @param array $request Request parameters
+     */
+    public function __construct(array $request)
+    {
+        parent::__construct($request);
+
+        $this->apiKeyRepository = new DbApiKeyRepository($this->db, $this->config);
+        $this->apiKeyService = new ApiKeyService(
+            $this->apiKeyRepository,
+            $this->db,
+            $this->config,
+            $this->messageService
+        );
+        $this->auditLogger = new LegacyLogger($this->db);
+        $this->ipAddressRetriever = new IpAddressRetriever($_SERVER);
+    }
+
+    /**
+     * Run the controller
+     */
+    public function run(): void
+    {
+        // Check if API is enabled in the config
+        if (!$this->config->get('api', 'enabled', false)) {
+            $this->showError(_('The API feature is disabled in the system configuration.'));
+            return;
+        }
+
+        // Allow ueberuser or users with api_manage_keys permission to manage API keys
+        if (
+            !UserManager::verifyPermission($this->db, 'user_is_ueberuser') &&
+            !UserManager::verifyPermission($this->db, 'api_manage_keys')
+        ) {
+            $this->showError(_('You do not have permission to manage API keys.'));
+            return;
+        }
+
+        // Set the current page for navigation highlighting
+        $this->setCurrentPage('api_keys');
+        $this->setPageTitle(_('API Keys'));
+
+        // Determine action from route name or fallback to query parameter for backward compatibility
+        $routeName = $this->getSafeRequestValue('_route');
+        $action = $this->getActionFromRoute($routeName) ?: ($this->getSafeRequestValue('action') ?: 'list');
+
+        // Special handling for API keys paths if route name detection fails
+        $requestUri = $_SERVER['REQUEST_URI'] ?? '';
+        if ($action === 'list') {
+            if (str_contains($requestUri, '/settings/api-keys/add')) {
+                $action = 'add';
+            } elseif (preg_match('#/settings/api-keys/(\d+)/delete#', $requestUri)) {
+                $action = 'delete';
+            } elseif (preg_match('#/settings/api-keys/(\d+)/edit#', $requestUri)) {
+                $action = 'edit';
+            } elseif (preg_match('#/settings/api-keys/(\d+)/regenerate#', $requestUri)) {
+                $action = 'regenerate';
+            } elseif (preg_match('#/settings/api-keys/(\d+)/toggle#', $requestUri)) {
+                $action = 'toggle';
+            }
+        }
+
+        switch ($action) {
+            case 'list':
+                $this->listApiKeys();
+                break;
+            case 'add':
+                $this->addApiKey();
+                break;
+            case 'edit':
+                $this->editApiKey();
+                break;
+            case 'delete':
+                $this->deleteApiKey();
+                break;
+            case 'regenerate':
+                $this->regenerateSecretKey();
+                break;
+            case 'toggle':
+                $this->toggleApiKey();
+                break;
+            default:
+                $this->listApiKeys();
+                break;
+        }
+    }
+
+    /**
+     * Map route name to action
+     */
+    private function getActionFromRoute(?string $routeName): ?string
+    {
+        return match ($routeName) {
+            'api_keys_list' => 'list',
+            'api_keys_add' => 'add',
+            'api_keys_edit' => 'edit',
+            'api_keys_delete' => 'delete',
+            'api_keys_regenerate' => 'regenerate',
+            'api_keys_toggle' => 'toggle',
+            default => null,
+        };
+    }
+
+    /**
+     * Show the list of API keys
+     */
+    private function listApiKeys(): void
+    {
+        $apiKeys = $this->apiKeyService->getAllApiKeys();
+
+        $this->render('api_keys.html', [
+            'api_keys' => $apiKeys,
+            'max_keys_per_user' => $this->config->get('api', 'max_keys_per_user', 5),
+            'current_keys_count' => $this->apiKeyRepository->countByUser($_SESSION['userid']),
+            'can_add_more' => UserManager::verifyPermission($this->db, 'user_is_ueberuser') ||
+                $this->apiKeyRepository->countByUser($_SESSION['userid']) < $this->config->get('api', 'max_keys_per_user', 5)
+        ]);
+    }
+
+    /**
+     * Add a new API key
+     */
+    private function addApiKey(): void
+    {
+        // Handle form submission
+        if ($this->isPost()) {
+            $this->validateCsrfToken();
+
+            // Process form data
+            $name = $this->getSafeRequestValue('name');
+            $expiresAt = $this->getSafeRequestValue('expires_at');
+
+            // Validate form data
+            if (empty($name)) {
+                $this->showError(_('API key name is required.'));
+                return;
+            }
+
+            // Parse expiration date if provided
+            $expiresAtDate = null;
+            if (!empty($expiresAt)) {
+                try {
+                    $expiresAtDate = new DateTime($expiresAt);
+                } catch (Exception $e) {
+                    $this->showError(_('Invalid expiration date format.'));
+                    return;
+                }
+            }
+
+            // Create the API key
+            $apiKey = $this->apiKeyService->createApiKey($name, $expiresAtDate);
+
+            if ($apiKey !== null) {
+                $this->auditLogger->logApiInfo(sprintf(
+                    'client_ip:%s user:%s operation:api_key_create key_id:%d key_name:%s',
+                    $this->ipAddressRetriever->getClientIp(),
+                    $this->getUserContextService()->getLoggedInUsername(),
+                    $apiKey->getId(),
+                    $apiKey->getName()
+                ));
+
+                // Show confirmation with the secret key - user needs to save it
+                $this->render('api_key_created.html', [
+                    'api_key' => $apiKey
+                ]);
+                return;
+            }
+
+            // Error occurred, it was already added to the message service by the API key service
+        }
+
+        // Show the add form
+        $this->render('api_key_add.html', []);
+    }
+
+    /**
+     * Edit an existing API key
+     */
+    private function editApiKey(): void
+    {
+        $id = (int)$this->getSafeRequestValue('id');
+
+        // Get the API key
+        $apiKey = $this->apiKeyService->getApiKey($id);
+
+        if ($apiKey === null) {
+            $this->showError(_('API key not found or you do not have permission to edit it.'));
+            return;
+        }
+
+        // Handle form submission
+        if ($this->isPost()) {
+            $this->validateCsrfToken();
+
+            // Process form data
+            $name = $this->getSafeRequestValue('name');
+            $expiresAt = $this->getSafeRequestValue('expires_at');
+            $disabled = $this->getSafeRequestValue('disabled') === 'on';
+
+            // Validate form data
+            if (empty($name)) {
+                $this->showError(_('API key name is required.'));
+                return;
+            }
+
+            // Parse expiration date if provided
+            $expiresAtDate = null;
+            if (!empty($expiresAt)) {
+                try {
+                    $expiresAtDate = new DateTime($expiresAt);
+                } catch (Exception $e) {
+                    $this->showError(_('Invalid expiration date format.'));
+                    return;
+                }
+            }
+
+            // Update the API key
+            $apiKey = $this->apiKeyService->updateApiKey($id, $name, $expiresAtDate, $disabled);
+
+            if ($apiKey !== null) {
+                $this->auditLogger->logApiInfo(sprintf(
+                    'client_ip:%s user:%s operation:api_key_edit key_id:%d key_name:%s',
+                    $this->ipAddressRetriever->getClientIp(),
+                    $this->getUserContextService()->getLoggedInUsername(),
+                    $id,
+                    $apiKey->getName()
+                ));
+
+                $this->messageService->addMessage('api_keys', 'success', _('API key updated successfully.'));
+                $this->redirect('/settings/api-keys');
+                return;
+            }
+
+            // Error occurred, it was already added to the message service by the API key service
+        }
+
+        // Show the edit form
+        $this->render('api_key_edit.html', [
+            'api_key' => $apiKey
+        ]);
+    }
+
+    /**
+     * Delete an API key
+     */
+    private function deleteApiKey(): void
+    {
+        $id = (int)$this->getSafeRequestValue('id');
+
+        // Handle form submission for confirmation
+        if ($this->isPost()) {
+            $this->validateCsrfToken();
+
+            // Get key name before deletion for logging
+            $apiKeyForLog = $this->apiKeyService->getApiKey($id);
+            $keyName = $apiKeyForLog !== null ? $apiKeyForLog->getName() : 'unknown';
+
+            // Delete the API key
+            $success = $this->apiKeyService->deleteApiKey($id);
+
+            if ($success) {
+                $this->auditLogger->logApiInfo(sprintf(
+                    'client_ip:%s user:%s operation:api_key_delete key_id:%d key_name:%s',
+                    $this->ipAddressRetriever->getClientIp(),
+                    $this->getUserContextService()->getLoggedInUsername(),
+                    $id,
+                    $keyName
+                ));
+
+                $this->messageService->addMessage('api_keys', 'success', _('API key deleted successfully.'));
+            }
+
+            $this->redirect('/settings/api-keys');
+            return;
+        }
+
+        // Get the API key
+        $apiKey = $this->apiKeyService->getApiKey($id);
+
+        if ($apiKey === null) {
+            $this->showError(_('API key not found or you do not have permission to delete it.'));
+            return;
+        }
+
+        // Show the delete confirmation
+        $this->render('api_key_delete.html', [
+            'api_key' => $apiKey
+        ]);
+    }
+
+    /**
+     * Regenerate the secret key for an API key
+     */
+    private function regenerateSecretKey(): void
+    {
+        $id = (int)$this->getSafeRequestValue('id');
+
+        // Handle form submission for confirmation
+        if ($this->isPost()) {
+            $this->validateCsrfToken();
+
+            // Regenerate the secret key
+            $apiKey = $this->apiKeyService->regenerateSecretKey($id);
+
+            if ($apiKey !== null) {
+                $this->auditLogger->logApiInfo(sprintf(
+                    'client_ip:%s user:%s operation:api_key_regenerate key_id:%d key_name:%s',
+                    $this->ipAddressRetriever->getClientIp(),
+                    $this->getUserContextService()->getLoggedInUsername(),
+                    $id,
+                    $apiKey->getName()
+                ));
+
+                // Show confirmation with the new secret key
+                $this->render('api_key_regenerated.html', [
+                    'api_key' => $apiKey
+                ]);
+                return;
+            }
+
+            // Error occurred, it was already added to the message service by the API key service
+        }
+
+        // Get the API key
+        $apiKey = $this->apiKeyService->getApiKey($id);
+
+        if ($apiKey === null) {
+            $this->showError(_('API key not found or you do not have permission to edit it.'));
+            return;
+        }
+
+        // Show the regenerate confirmation
+        $this->render('api_key_regenerate.html', [
+            'api_key' => $apiKey
+        ]);
+    }
+
+    /**
+     * Toggle the disabled status of an API key
+     */
+    private function toggleApiKey(): void
+    {
+        $this->validateCsrfToken();
+
+        $id = (int)$this->getSafeRequestValue('id');
+        $disable = $this->getSafeRequestValue('disable') === '1';
+
+        // Toggle the API key status
+        $apiKey = $this->apiKeyService->toggleApiKey($id, $disable);
+
+        if ($apiKey !== null) {
+            $status = $disable ? 'disabled' : 'enabled';
+
+            $this->auditLogger->logApiInfo(sprintf(
+                'client_ip:%s user:%s operation:api_key_toggle key_id:%d key_name:%s status:%s',
+                $this->ipAddressRetriever->getClientIp(),
+                $this->getUserContextService()->getLoggedInUsername(),
+                $id,
+                $apiKey->getName(),
+                $status
+            ));
+
+            $translatedStatus = $disable ? _('disabled') : _('enabled');
+            $this->messageService->addMessage('api_keys', 'success', sprintf(_('API key %s successfully.'), $translatedStatus));
+        }
+
+        $this->redirect('/settings/api-keys');
+    }
+}

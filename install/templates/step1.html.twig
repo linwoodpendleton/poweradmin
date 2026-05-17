@@ -1,0 +1,443 @@
+{% extends 'base.html.twig' %}
+
+{% block step_description %}{% trans %}Choose a language{% endtrans %}{% endblock %}
+
+{% block content %}
+    <div class="card shadow-sm mb-3">
+        <div class="card-header bg-secondary text-white">
+            {% trans %}Step{% endtrans %} {{ current_step }}: {% trans %}Choose a language for installation{% endtrans %}
+        </div>
+        <div class="card-body py-3">
+            <div class="text-center mb-3">
+                <p class="mb-0">{% trans %}Please select your preferred language to continue with the installation:{% endtrans %}</p>
+            </div>
+
+            <form method="post">
+                <input type="hidden" name="install_token" value="{{ install_token }}">
+                <div class="row justify-content-center">
+                    <div class="col-12">
+                        <div class="language-selection">
+                            <div class="row row-cols-1 row-cols-md-2 row-cols-lg-4 g-2">
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_id_ID" class="form-check-input" type="radio" name="language" value="id_ID">
+                                                <label for="language_id_ID" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-id me-2"></span> Bahasa Indonesia
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_cs_CZ" class="form-check-input" type="radio" name="language" value="cs_CZ">
+                                                <label for="language_cs_CZ" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-cz me-2"></span> Čeština
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_de_DE" class="form-check-input" type="radio" name="language" value="de_DE">
+                                                <label for="language_de_DE" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-de me-2"></span> Deutsch
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_et_EE" class="form-check-input" type="radio" name="language" value="et_EE">
+                                                <label for="language_et_EE" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-ee me-2"></span> Eesti
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_en_EN" class="form-check-input" type="radio" name="language" value="en_EN" checked>
+                                                <label for="language_en_EN" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-gb me-2"></span> English
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_es_ES" class="form-check-input" type="radio" name="language" value="es_ES">
+                                                <label for="language_es_ES" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-es me-2"></span> Español
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_fr_FR" class="form-check-input" type="radio" name="language" value="fr_FR">
+                                                <label for="language_fr_FR" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-fr me-2"></span> Français
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_hr_HR" class="form-check-input" type="radio" name="language" value="hr_HR">
+                                                <label for="language_hr_HR" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-hr me-2"></span> Hrvatski
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_it_IT" class="form-check-input" type="radio" name="language" value="it_IT">
+                                                <label for="language_it_IT" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-it me-2"></span> Italiano
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_lv_LV" class="form-check-input" type="radio" name="language" value="lv_LV">
+                                                <label for="language_lv_LV" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-lv me-2"></span> Latviešu
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_lt_LT" class="form-check-input" type="radio" name="language" value="lt_LT">
+                                                <label for="language_lt_LT" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-lt me-2"></span> Lietuvių
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_hu_HU" class="form-check-input" type="radio" name="language" value="hu_HU">
+                                                <label for="language_hu_HU" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-hu me-2"></span> Magyar
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_nl_NL" class="form-check-input" type="radio" name="language" value="nl_NL">
+                                                <label for="language_nl_NL" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-nl me-2"></span> Nederlands
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_nb_NO" class="form-check-input" type="radio" name="language" value="nb_NO">
+                                                <label for="language_nb_NO" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-no me-2"></span> Norsk
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_pl_PL" class="form-check-input" type="radio" name="language" value="pl_PL">
+                                                <label for="language_pl_PL" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-pl me-2"></span> Polski
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_pt_PT" class="form-check-input" type="radio" name="language" value="pt_PT">
+                                                <label for="language_pt_PT" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-pt me-2"></span> Português
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_ro_RO" class="form-check-input" type="radio" name="language" value="ro_RO">
+                                                <label for="language_ro_RO" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-ro me-2"></span> Română
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_sk_SK" class="form-check-input" type="radio" name="language" value="sk_SK">
+                                                <label for="language_sk_SK" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-sk me-2"></span> Slovenčina
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_fi_FI" class="form-check-input" type="radio" name="language" value="fi_FI">
+                                                <label for="language_fi_FI" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-fi me-2"></span> Suomi
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_sv_SE" class="form-check-input" type="radio" name="language" value="sv_SE">
+                                                <label for="language_sv_SE" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-se me-2"></span> Svenska
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_vi_VN" class="form-check-input" type="radio" name="language" value="vi_VN">
+                                                <label for="language_vi_VN" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-vn me-2"></span> Tiếng Việt
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_tr_TR" class="form-check-input" type="radio" name="language" value="tr_TR">
+                                                <label for="language_tr_TR" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-tr me-2"></span> Türkçe
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_ru_RU" class="form-check-input" type="radio" name="language" value="ru_RU">
+                                                <label for="language_ru_RU" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-ru me-2"></span> Русский
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_sr_RS" class="form-check-input" type="radio" name="language" value="sr_RS">
+                                                <label for="language_sr_RS" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-rs me-2"></span> Српски
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_uk_UA" class="form-check-input" type="radio" name="language" value="uk_UA">
+                                                <label for="language_uk_UA" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-ua me-2"></span> Українська
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_zh_CN" class="form-check-input" type="radio" name="language" value="zh_CN">
+                                                <label for="language_zh_CN" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-cn me-2"></span> 中文
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_ja_JP" class="form-check-input" type="radio" name="language" value="ja_JP">
+                                                <label for="language_ja_JP" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-jp me-2"></span> 日本語
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col">
+                                    <div class="card h-100 language-card">
+                                        <div class="card-body d-flex align-items-center">
+                                            <div class="form-check mb-0">
+                                                <input id="language_ko_KR" class="form-check-input" type="radio" name="language" value="ko_KR">
+                                                <label for="language_ko_KR" class="form-check-label d-flex align-items-center">
+                                                    <span class="fi fi-kr me-2"></span> 한국어
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <input type="hidden" name="step" value="{{ next_step }}">
+                <div class="mt-3 text-center">
+                    <input type="submit" name="submit" class="btn btn-sm btn-primary" value="{% trans %}Begin Installation{% endtrans %}">
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <style>
+        .language-card {
+            transition: all 0.2s ease;
+            border: 1px solid #dee2e6;
+            cursor: pointer;
+        }
+        
+        .language-card:hover {
+            border-color: #007bff;
+            box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.1);
+            transform: translateY(-2px);
+        }
+        
+        .form-check-input:checked + .form-check-label {
+            font-weight: bold;
+        }
+        
+        .form-check-label {
+            width: 100%;
+            cursor: pointer;
+        }
+        
+        .language-card .card-body {
+            padding: 0.5rem 0.75rem;
+        }
+
+        .language-card .form-check {
+            width: 100%;
+        }
+
+        .language-card .form-check-label {
+            font-size: 0.925rem;
+        }
+    </style>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Make entire card clickable for language selection
+            document.querySelectorAll('.language-card').forEach(card => {
+                card.addEventListener('click', function() {
+                    const radio = this.querySelector('input[type="radio"]');
+                    radio.checked = true;
+                });
+            });
+        });
+    </script>
+{% endblock %}

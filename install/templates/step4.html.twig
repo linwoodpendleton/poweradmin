@@ -1,0 +1,422 @@
+{% extends 'base.html.twig' %}
+
+{% block step_description %}{% trans %}Configuring database{% endtrans %}{% endblock %}
+
+{% block content %}
+    <div class="card shadow-sm mb-4">
+        <div class="card-header bg-secondary text-white">
+            {% trans %}Step{% endtrans %} {{ current_step }}: {% trans %}Configuring Database Connection{% endtrans %}
+        </div>
+        <div class="card-body">
+            <form class="needs-validation" method="post" novalidate>
+                <input type="hidden" name="install_token" value="{{ install_token }}">
+
+                <!-- PowerDNS Backend Selection -->
+                <div class="card mb-3">
+                    <div class="card-header">
+                        <strong>{% trans %}PowerDNS Backend{% endtrans %}</strong>
+                    </div>
+                    <div class="card-body">
+                        <p class="small mb-2">{% trans %}Choose how Poweradmin communicates with PowerDNS:{% endtrans %}</p>
+                        <div class="form-check mb-1">
+                            <input class="form-check-input" type="radio" name="pdns_api_backend" id="backend_sql" value="sql"
+                                   {% if pdns_api_backend != 'api' %}checked{% endif %} onChange="updateBackendFields()">
+                            <label class="form-check-label small" for="backend_sql">
+                                <strong>{% trans %}SQL{% endtrans %}</strong> - {% trans %}Direct access to PowerDNS database tables{% endtrans %}
+                            </label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="pdns_api_backend" id="backend_api" value="api"
+                                   {% if pdns_api_backend == 'api' %}checked{% endif %} onChange="updateBackendFields()">
+                            <label class="form-check-label small" for="backend_api">
+                                <strong>{% trans %}API{% endtrans %}</strong> - {% trans %}PowerDNS REST API{% endtrans %}
+                                <span class="badge bg-warning text-dark ms-1">{% trans %}Experimental{% endtrans %}</span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- PowerDNS API Settings (shown when API backend selected) -->
+                <div class="card mb-3" id="pdns_api_section" style="display: none;">
+                    <div class="card-header">
+                        <strong>{% trans %}PowerDNS API Settings{% endtrans %}</strong>
+                    </div>
+                    <div class="card-body">
+                        <div class="row mb-2">
+                            <label for="pdns_api_url" class="col-md-2 col-form-label col-form-label-sm">{% trans %}API URL{% endtrans %}</label>
+                            <div class="col-md-4">
+                                <input type="text" class="form-control form-control-sm" id="pdns_api_url" name="pdns_api_url"
+                                       value="{{ pdns_api_url }}" placeholder="http://127.0.0.1:8081">
+                            </div>
+                            <div class="col-md-6">
+                                <span class="form-text small">{% trans %}PowerDNS API endpoint URL.{% endtrans %}</span>
+                            </div>
+                        </div>
+
+                        <div class="row mb-2">
+                            <label for="pdns_api_key" class="col-md-2 col-form-label col-form-label-sm">{% trans %}API Key{% endtrans %}</label>
+                            <div class="col-md-4">
+                                <div class="input-group input-group-sm">
+                                    <input type="password" class="form-control form-control-sm" id="pdns_api_key" name="pdns_api_key"
+                                           value="{{ pdns_api_key }}" autocomplete="off">
+                                    <button class="btn btn-sm btn-outline-secondary" type="button" onclick="showPassword('pdns_api_key', 'eye_api')"><i class="bi bi-eye-fill" id="eye_api"></i></button>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <span class="form-text small">{% trans %}PowerDNS API key (from pdns.conf api-key setting).{% endtrans %}</span>
+                            </div>
+                        </div>
+
+                        <div class="row mb-2">
+                            <label for="pdns_api_server_name" class="col-md-2 col-form-label col-form-label-sm">{% trans %}Server name{% endtrans %}</label>
+                            <div class="col-md-4">
+                                <input type="text" class="form-control form-control-sm" id="pdns_api_server_name" name="pdns_api_server_name"
+                                       value="{{ pdns_api_server_name|default('localhost') }}" placeholder="localhost">
+                            </div>
+                            <div class="col-md-6">
+                                <span class="form-text small">{% trans %}PowerDNS server name for API calls (usually "localhost").{% endtrans %}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Database Connection Settings -->
+                <div class="card mb-3">
+                    <div class="card-header">
+                        <strong>{% trans %}Database Connection Settings{% endtrans %}</strong>
+                    </div>
+                    <div class="card-body">
+                        <div class="alert alert-info py-1 mb-2 small" id="db_info_sql">
+                            <strong>{% trans %}Database Configuration:{% endtrans %}</strong> {% trans %}Configure database connection with table creation rights. PowerDNS location can be specified separately if needed.{% endtrans %}
+                        </div>
+                        <div class="alert alert-info py-1 mb-2 small" id="db_info_api" style="display: none;">
+                            <strong>{% trans %}Database Configuration:{% endtrans %}</strong> {% trans %}Configure database connection for Poweradmin tables (users, permissions, zones). PowerDNS tables are not required.{% endtrans %}
+                        </div>
+
+                        <div class="row mb-2">
+                            <label for="db_type" class="col-md-2 col-form-label col-form-label-sm">{% trans %}Database type{% endtrans %}</label>
+                            <div class="col-md-4">
+                                <select id="db_type" class="form-select form-select-sm" name="db_type" onChange="updateFormFields(this.value)">
+                                    <option value="mysql" {% if db_type == 'mysql' %}selected{% endif %}>MySQL</option>
+                                    <option value="pgsql" {% if db_type == 'pgsql' %}selected{% endif %}>PostgreSQL</option>
+                                    <option value="sqlite" {% if db_type == 'sqlite' %}selected{% endif %}>SQLite</option>
+                                </select>
+                            </div>
+                            <div class="col-md-6">
+                                <span class="form-text small">{% trans %}Database server type.{% endtrans %}</span>
+                            </div>
+                        </div>
+
+                        <div class="row mb-2" id="username_row">
+                            <label for="username" class="col-md-2 col-form-label col-form-label-sm">{% trans %}Username{% endtrans %}</label>
+                            <div class="col-md-4">
+                                <input id="username" class="form-control form-control-sm" type="text" name="db_user" value="{{ db_user }}" required>
+                                <div class="invalid-feedback">{% trans %}Provide the user name{% endtrans %}</div>
+                            </div>
+                            <div class="col-md-6">
+                                <span class="form-text small">{% trans %}Database username with rights to create tables.{% endtrans %}</span>
+                            </div>
+                        </div>
+
+                        <div class="row mb-2" id="password_row">
+                            <label for="userpass" class="col-md-2 col-form-label col-form-label-sm">{% trans %}Password{% endtrans %}</label>
+                            <div class="col-md-4">
+                                <div class="input-group input-group-sm">
+                                    <input class="form-control form-control-sm" type="password" id="userpass" name="db_pass" value="{{ db_pass }}" autocomplete="off" required>
+                                    <button class="btn btn-sm btn-outline-secondary" type="button" onclick="showPassword('userpass', 'eye1')"><i class="bi bi-eye-fill" id="eye1"></i></button>
+                                    <div class="invalid-feedback">{% trans %}Provide user password{% endtrans %}</div>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <span class="form-text small">{% trans %}Password for this database user.{% endtrans %}<br>
+                                <small class="text-muted">{% trans %}Avoid quotes, backslashes, and line breaks.{% endtrans %}</small></span>
+                            </div>
+                        </div>
+
+                        <div class="row mb-2" id="db_hostname_row">
+                            <label for="host" class="col-md-2 col-form-label col-form-label-sm">{% trans %}Hostname{% endtrans %}</label>
+                            <div class="col-md-4">
+                                <input class="form-control form-control-sm" type="text" id="host" name="db_host" value="{{ db_host|default('localhost') }}" required>
+                                <div class="invalid-feedback">{% trans %}Provide the hostname{% endtrans %}</div>
+                            </div>
+                            <div class="col-md-6">
+                                <span class="form-text small">{% trans %}Database server hostname (usually "localhost").{% endtrans %}</span>
+                            </div>
+                        </div>
+
+                        <div class="row mb-2" id="db_port_row">
+                            <label for="db_port" class="col-md-2 col-form-label col-form-label-sm">{% trans %}DB Port{% endtrans %}</label>
+                            <div class="col-md-4">
+                                <input class="form-control form-control-sm" type="text" id="db_port" name="db_port" value="{{ db_port|default('3306') }}" required>
+                                <div class="invalid-feedback">{% trans %}Provide database port{% endtrans %}</div>
+                            </div>
+                            <div class="col-md-6">
+                                <span class="form-text small">{% trans %}Database server port.{% endtrans %}</span>
+                            </div>
+                        </div>
+
+                        <div class="row mb-2">
+                            <label for="db_name" class="col-md-2 col-form-label col-form-label-sm">{% trans %}Database{% endtrans %}</label>
+                            <div class="col-md-4">
+                                <input class="form-control form-control-sm" type="text" id="db_name" name="db_name" value="{{ db_name }}" required>
+                                <div class="invalid-feedback">{% trans %}Provide the name of the database{% endtrans %}</div>
+                            </div>
+                            <div class="col-md-6">
+                                <span class="form-text small" id="db_name_title">{% trans %}Database name (will be used for Poweradmin tables).{% endtrans %}</span>
+                                <span class="form-text small" id="db_path_title" style="display: none;">
+                                    {% trans %}Full path to SQLite database file{% endtrans %}
+                                    <div class="alert alert-warning py-1 mt-1 mb-0">
+                                        <small>
+                                            <strong>{% trans %}Note:{% endtrans %}</strong> {% trans %}File must exist with web server read/write access. Use absolute path.{% endtrans %}
+                                        </small>
+                                    </div>
+                                </span>
+                            </div>
+                        </div>
+
+                        <div class="row mb-2" id="db_charset_row">
+                            <label for="db_charset" class="col-md-2 col-form-label col-form-label-sm">{% trans %}DB charset{% endtrans %}</label>
+                            <div class="col-md-4">
+                                <select class="form-select form-select-sm" id="db_charset" name="db_charset">
+                                    <option value="">{% trans %}Use default{% endtrans %}</option>
+                                </select>
+                            </div>
+                            <div class="col-md-6">
+                                <span class="form-text small">{% trans %}Charset for new tables. Leave empty for database default.{% endtrans %}</span>
+                            </div>
+                        </div>
+
+                        <div class="row mb-2" id="db_collation_row">
+                            <label for="db_collation" class="col-md-2 col-form-label col-form-label-sm">{% trans %}DB collation{% endtrans %}</label>
+                            <div class="col-md-4">
+                                <select class="form-select form-select-sm" id="db_collation" name="db_collation">
+                                    <option value="">{% trans %}Use default{% endtrans %}</option>
+                                </select>
+                            </div>
+                            <div class="col-md-6">
+                                <span class="form-text small">{% trans %}Collation rules for character comparison. Leave empty for database default.{% endtrans %}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- PowerDNS Database Location (only for MySQL + SQL backend) -->
+                <div class="card mb-3" id="pdns_db_section" style="display: none;">
+                    <div class="card-header">
+                        <strong>{% trans %}PowerDNS Database{% endtrans %} ({% trans %}Optional{% endtrans %})</strong>
+                    </div>
+                    <div class="card-body">
+                        <div class="row mb-2">
+                            <label for="pdns_db_name" class="col-md-2 col-form-label col-form-label-sm">{% trans %}Database name{% endtrans %}</label>
+                            <div class="col-md-4">
+                                <input type="text" class="form-control form-control-sm" id="pdns_db_name" name="pdns_db_name"
+                                       value="{{ pdns_db_name }}" placeholder="{% trans %}Leave empty for same database{% endtrans %}">
+                            </div>
+                            <div class="col-md-6">
+                                <span class="form-text small">{% trans %}MySQL database with PowerDNS tables (if different).{% endtrans %}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card mb-3">
+                    <div class="card-header">
+                        <strong>{% trans %}Poweradmin Account{% endtrans %}</strong>
+                    </div>
+                    <div class="card-body">
+                        <div class="row mb-2">
+                            <label for="pa_pass" class="col-md-2 col-form-label col-form-label-sm">{% trans %}Administrator password{% endtrans %}</label>
+                            <div class="col-md-4">
+                                <div class="input-group input-group-sm">
+                                    <input class="form-control form-control-sm" type="password" id="pa_pass" name="pa_pass" value="{{ pa_pass }}" autocomplete="off" required>
+                                    <button class="btn btn-sm btn-outline-secondary" type="button" onclick="showPassword('pa_pass', 'eye2')"><i class="bi bi-eye-fill" id="eye2"></i></button>
+                                    <div class="invalid-feedback">{% trans %}Provide a password{% endtrans %}</div>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="form-text small">
+                                    {% trans %}Password for "admin" username.{% endtrans %}
+                                    <span class="badge bg-info text-dark ms-1">6+ chars</span>
+                                    <span class="badge bg-info text-dark">1+ uppercase</span>
+                                    <span class="badge bg-info text-dark">1+ lowercase</span>
+                                    <span class="badge bg-info text-dark">1+ number</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mt-3">
+                    <input type="hidden" name="step" value="{{ next_step }}">
+                    <input type="hidden" name="language" value="{{ language }}">
+                    <div class="mt-4 text-center">
+                        <input type="submit" name="submit" class="btn btn-sm btn-primary" value="{% trans %}Continue to step{% endtrans %} {{ next_step }}">
+                    </div>
+                </div>
+            </form>
+        </div>
+    </div>
+{% endblock %}
+
+{% block javascripts %}
+    <script>
+        const charsets = {{ charsets|json_encode|raw }};
+        const collations = {{ collations|json_encode|raw }};
+
+        function updateDatabaseFields(dbType) {
+            const charsetSelect = document.querySelector('select[name="db_charset"]');
+            const collationSelect = document.querySelector('select[name="db_collation"]');
+
+            const charsetOptions = charsets[dbType] || [];
+            const collationOptions = collations[dbType] || [];
+
+            charsetSelect.innerHTML = '<option value="">{% trans %}Use default{% endtrans %}</option>';
+            charsetOptions.forEach(charset => {
+                const option = document.createElement('option');
+                option.value = charset;
+                option.textContent = charset;
+                charsetSelect.appendChild(option);
+            });
+
+            collationSelect.innerHTML = '<option value="">{% trans %}Use default{% endtrans %}</option>';
+            collationOptions.forEach(collation => {
+                const option = document.createElement('option');
+                option.value = collation;
+                option.textContent = collation;
+                collationSelect.appendChild(option);
+            });
+        }
+
+        function updateBackendFields() {
+            const isApi = document.getElementById('backend_api').checked;
+            const pdnsApiSection = document.getElementById('pdns_api_section');
+            const pdnsDbSection = document.getElementById('pdns_db_section');
+            const dbInfoSql = document.getElementById('db_info_sql');
+            const dbInfoApi = document.getElementById('db_info_api');
+            const dbType = document.getElementById('db_type').value;
+
+            // Toggle API settings card
+            pdnsApiSection.style.display = isApi ? '' : 'none';
+
+            // Toggle info messages
+            dbInfoSql.style.display = isApi ? 'none' : '';
+            dbInfoApi.style.display = isApi ? '' : 'none';
+
+            // Toggle PowerDNS DB section (only for MySQL + SQL backend)
+            if (!isApi && dbType === 'mysql') {
+                pdnsDbSection.style.display = '';
+            } else {
+                pdnsDbSection.style.display = 'none';
+                const pdnsDbNameInput = document.getElementById('pdns_db_name');
+                if (pdnsDbNameInput) {
+                    pdnsDbNameInput.value = '';
+                }
+            }
+        }
+
+        function updateFormFields(dbType) {
+            // Fields to show/hide based on DB type
+            const usernameRow = document.getElementById('username_row');
+            const passwordRow = document.getElementById('password_row');
+            const hostnameRow = document.getElementById('db_hostname_row');
+            const portRow = document.getElementById('db_port_row');
+            const charsetRow = document.getElementById('db_charset_row');
+            const collationRow = document.getElementById('db_collation_row');
+
+            // Input fields
+            const usernameInput = document.getElementById('username');
+            const passwordInput = document.getElementById('userpass');
+            const hostnameInput = document.getElementById('host');
+            const portInput = document.getElementById('db_port');
+
+            // Text labels for database field
+            const dbNameTitle = document.getElementById('db_name_title');
+            const dbPathTitle = document.getElementById('db_path_title');
+
+            // Database name/path input field
+            const dbNameInput = document.getElementById('db_name');
+
+            if (dbType === 'sqlite') {
+                // For SQLite, hide user/pass/host/port fields
+                usernameRow.style.display = 'none';
+                passwordRow.style.display = 'none';
+                hostnameRow.style.display = 'none';
+                portRow.style.display = 'none';
+                charsetRow.style.display = 'none';
+                collationRow.style.display = 'none';
+
+                // Remove 'required' attribute from hidden fields
+                usernameInput.removeAttribute('required');
+                passwordInput.removeAttribute('required');
+                hostnameInput.removeAttribute('required');
+                portInput.removeAttribute('required');
+
+                // Show SQLite-specific help text and hide MySQL/PostgreSQL help
+                dbNameTitle.style.display = 'none';
+                dbPathTitle.style.display = 'block';
+
+                // Update input placeholder for SQLite
+                dbNameInput.placeholder = '/path/to/database.sqlite';
+
+                // If the field is empty or doesn't look like a path, set the default SQLite path
+                if (!dbNameInput.value || !dbNameInput.value.includes('/')) {
+                    dbNameInput.value = '/var/lib/powerdns/pdns.sqlite';
+                }
+            } else {
+                // For MySQL/PostgreSQL, show all fields
+                usernameRow.style.display = '';
+                passwordRow.style.display = '';
+                hostnameRow.style.display = '';
+                portRow.style.display = '';
+                charsetRow.style.display = '';
+                collationRow.style.display = '';
+
+                // Add 'required' attribute back to visible fields
+                usernameInput.setAttribute('required', '');
+                passwordInput.setAttribute('required', '');
+                hostnameInput.setAttribute('required', '');
+                portInput.setAttribute('required', '');
+
+                // Show MySQL/PostgreSQL-specific help text and hide SQLite help
+                dbNameTitle.style.display = 'block';
+                dbPathTitle.style.display = 'none';
+
+                // Update input placeholder for MySQL/PostgreSQL
+                dbNameInput.placeholder = 'poweradmin';
+
+                // Clear SQLite path if switching from SQLite to MySQL/PostgreSQL
+                if (dbNameInput.value && dbNameInput.value.includes('/')) {
+                    dbNameInput.value = 'poweradmin';
+                }
+
+                // Update port if it's one of the standard ports
+                if (dbType === 'mysql' && (!portInput.value || portInput.value === '5432')) {
+                    portInput.value = '3306';
+                } else if (dbType === 'pgsql' && (!portInput.value || portInput.value === '3306')) {
+                    portInput.value = '5432';
+                }
+            }
+
+            // Update backend-dependent sections (PowerDNS DB section visibility)
+            updateBackendFields();
+
+            // Reset validation state when changing database type
+            const form = document.querySelector('form.needs-validation');
+            form.classList.remove('was-validated');
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            const dbTypeElement = document.getElementById('db_type');
+            if (dbTypeElement) {
+                updateFormFields(dbTypeElement.value);
+                updateDatabaseFields(dbTypeElement.value);
+
+                dbTypeElement.addEventListener('change', function() {
+                    updateFormFields(this.value);
+                    updateDatabaseFields(this.value);
+                });
+            }
+            updateBackendFields();
+        });
+    </script>
+{% endblock %}

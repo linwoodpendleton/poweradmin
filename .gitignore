@@ -1,7 +1,15 @@
 # Poweradmin related
-inc/config.inc.php
+/inc/config.inc.php
+/config/settings.php
 /scripts
-templates/custom
+/templates/*
+/templates/default/custom/*
+!/templates/default
+!/templates/modern
+!/templates/emails
+/templates/emails/custom/*
+!/templates/emails/custom/README.md
+!/templates/default/custom/README.md
 
 # OS generated files
 .DS_Store
@@ -12,33 +20,69 @@ ehthumbs.db
 Thumbs.db
 
 # IDE
-nbproject
-.idea
-.settings
-.buildpath
-.project
-.vscode
+/nbproject
+/.idea
+/.settings
+/.buildpath
+/.project
+/.vscode
+.phpactor.json
 
 # phpDocumentor
-docs
-.phive
-tools
+/docs
+/.phive
 
 # PHPUnit
-.phpunit.cache
-.phpunit.result.cache
+/.phpunit.cache
+/.phpunit.result.cache
 
 # Devcontainer
-.devcontainer/scripts/pdns
+/.devcontainer/scripts/pdns
+/.ddev
 
 # Dependency directories
-node_modules/
+/node_modules/
+package-lock.json
 
 # Logs
-logs
-*.log
-npm-debug.log*
+/logs
+/*.log
+/npm-debug.log*
 
-# Cypress
-cypress/videos
-cypress/screenshots
+# Temporary files
+*.diff
+*.patch
+
+# Translation working files
+*_untranslated.json
+locale/**/*.po.bak
+locale/**/*.po.backup.*
+
+# Playwright
+/playwright-report/
+/playwright/.cache/
+/test-results/
+*.trace.zip
+/blob-report/
+/playwright/.auth/
+/.playwright-mcp/
+
+# PHP tools
+/.php-cs-fixer.cache
+.phan/phan.phar
+.phpdoc/phpDocumentor.phar
+
+# Node.js version manager
+/.nvmrc
+
+# Test plans are versioned but excluded from production packages
+# See tests/plans/ directory
+
+# API test environment files
+.env.api-test
+
+# AI assistant instruction files
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+/.claude/

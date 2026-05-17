@@ -1,0 +1,32 @@
+name: Issue Labeler
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  label-issues:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Label Dependency Dashboard
+        if: github.event.issue.title == 'Dependency Dashboard'
+        run: |
+          gh issue edit ${{ github.event.issue.number }} --remove-label auth,dns,ui,infra,i18n,security,api,ui-templates,installer,validation || true
+          gh issue edit ${{ github.event.issue.number }} --add-label dependencies
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Apply keyword-based labels
+        if: github.event.issue.title != 'Dependency Dashboard'
+        uses: github/issue-labeler@v3.4
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          configuration-path: .github/issue-labeler.yml
+          include-title: 1
+          enable-versioned-regex: 0

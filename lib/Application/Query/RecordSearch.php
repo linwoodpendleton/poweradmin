@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -22,6 +22,14 @@
 
 namespace Poweradmin\Application\Query;
 
+use Poweradmin\Domain\Service\DnsIdnService;
+use Poweradmin\Infrastructure\Database\DbCompat;
+use Poweradmin\Infrastructure\Utility\SortHelper;
+use Poweradmin\Infrastructure\Database\TableNameService;
+use Poweradmin\Infrastructure\Database\PdnsTable;
+
+// TODO: search_group_records relies on MySQL sql_mode hacks plus per-backend
+// MIN() workarounds; rewrite with proper cross-database GROUP BY.
 class RecordSearch extends BaseSearch
 {
     /**
@@ -30,12 +38,14 @@ class RecordSearch extends BaseSearch
      * @param array $parameters An array of search parameters.
      * @param string $permission_view The permission view for the search.
      * @param string $sort_records_by The column to sort the records by.
+     * @param string $record_sort_direction
      * @param bool $iface_search_group_records Whether to group records or not.
      * @param int $iface_rowamount The number of rows to display per page.
+     * @param bool $iface_record_comments Whether to display record comments or not.
      * @param int $page The current page number (default is 1).
      * @return array An array of found records.
      */
-    public function searchRecords(array $parameters, string $permission_view, string $sort_records_by, bool $iface_search_group_records, int $iface_rowamount, int $page = 1): array
+    public function searchRecords(array $parameters, string $permission_view, string $sort_records_by, string $record_sort_direction, bool $iface_search_group_records, int $iface_rowamount, bool $iface_record_comments, int $page = 1): array
     {
         $foundRecords = array();
 
@@ -44,7 +54,19 @@ class RecordSearch extends BaseSearch
         $originalSqlMode = $this->handleSqlMode();
 
         if ($parameters['records']) {
-            $foundRecords = $this->fetchRecords($search_string, $parameters['reverse'], $reverse_search_string, $permission_view, $iface_search_group_records, $sort_records_by, $iface_rowamount, $page);
+            $foundRecords = $this->fetchRecords(
+                $parameters,
+                $search_string,
+                $parameters['reverse'],
+                $reverse_search_string,
+                $permission_view,
+                $iface_search_group_records,
+                $sort_records_by,
+                $record_sort_direction,
+                $iface_rowamount,
+                $iface_record_comments,
+                $page
+            );
         }
 
         $this->restoreSqlMode($originalSqlMode);
@@ -55,25 +77,110 @@ class RecordSearch extends BaseSearch
     /**
      * Fetch records based on the given search criteria.
      *
-     * @param mixed $search_string The search string to use for matching records.
-     * @param bool $reverse Whether to perform a reverse search or not.
-     * @param mixed $reverse_search_string The reverse search string to use for matching records.
-     * @param string $permission_view The permission view for the search.
-     * @param bool $iface_search_group_records Whether to search group records or not.
-     * @param string $sort_records_by The column to sort the records by.
-     * @param int $iface_rowamount The number of rows to display per page.
-     * @param int $page The current page number.
-     * @return array An array of found records.
+     * @param array $parameters Search parameters
+     * @param mixed $search_string Search string for matching records
+     * @param bool $reverse Whether to perform a reverse search
+     * @param mixed $reverse_search_string Reverse search string for matching records
+     * @param string $permission_view Permission view for the search
+     * @param bool $iface_search_group_records Whether to search group records
+     * @param string $sort_records_by Column to sort records by
+     * @param string $record_sort_direction Sort direction
+     * @param int $iface_rowamount Rows per page
+     * @param bool $iface_record_comments Whether to display record comments
+     * @param int $page Current page number
+     * @return array Found records
      */
-    public function fetchRecords(mixed $search_string, bool $reverse, mixed $reverse_search_string, string $permission_view, bool $iface_search_group_records, string $sort_records_by, int $iface_rowamount, int $page): array
-    {
+    public function fetchRecords(
+        array $parameters,
+        mixed $search_string,
+        bool $reverse,
+        mixed $reverse_search_string,
+        string $permission_view,
+        bool $iface_search_group_records,
+        string $sort_records_by,
+        string $record_sort_direction,
+        int $iface_rowamount,
+        bool $iface_record_comments,
+        int $page
+    ): array {
         $offset = ($page - 1) * $iface_rowamount;
 
-        $pdns_db_name = $this->config->get('pdns_db_name');
-        $records_table = $pdns_db_name ? $pdns_db_name . '.records' : 'records';
+        $tableNameService = new TableNameService($this->config);
+        $records_table = $tableNameService->getTable(PdnsTable::RECORDS);
+        $comments_table = $tableNameService->getTable(PdnsTable::COMMENTS);
 
-        $recordsQuery = "
-            SELECT
+        $db_type = $this->config->get('database', 'type');
+        $sort_records_by = $sort_records_by === 'name' ? SortHelper::getRecordSortOrder($records_table, $db_type, $record_sort_direction) : "$records_table.$sort_records_by $record_sort_direction";
+
+        // Prepare query parameters
+        $params = [];
+
+        // Build query with new type and content filters
+        $typeFilter = '';
+        if (!empty($parameters['type_filter'])) {
+            $typeFilter = " AND $records_table.type = :type_filter";
+            $params[':type_filter'] = $parameters['type_filter'];
+        }
+
+        $contentFilter = '';
+        if (!empty($parameters['content_filter'])) {
+            // Add wildcards automatically if they're not already present
+            $content = $parameters['content_filter'];
+            if (strpos($content, '%') === false) {
+                $content = '%' . $content . '%';
+            }
+            $contentFilter = " AND $records_table.content LIKE :content_filter";
+            $params[':content_filter'] = $content;
+        }
+
+        // Per-record comments via linking table, with fallback to RRset-based comments for legacy data
+        // Uses COALESCE with two subqueries to avoid ORDER BY with outer table
+        // references which SQLite does not support in correlated subqueries.
+        $links_table = 'record_comment_links';
+        $castId = DbCompat::castToString($db_type, "$records_table.id");
+        $commentExpr = '';
+        if ($iface_record_comments) {
+            $commentExpr = "COALESCE(
+                (
+                    SELECT c.comment
+                    FROM $links_table rcl
+                    JOIN $comments_table c ON c.id = rcl.comment_id
+                    WHERE rcl.record_id = $castId
+                    LIMIT 1
+                ),
+                (
+                    SELECT c.comment
+                    FROM $comments_table c
+                    WHERE c.domain_id = $records_table.domain_id
+                      AND c.name = $records_table.name
+                      AND c.type = $records_table.type
+                      AND NOT EXISTS (
+                          SELECT 1 FROM $links_table rcl2
+                          WHERE rcl2.comment_id = c.id
+                      )
+                    LIMIT 1
+                )
+            )";
+        }
+
+        // Use aggregate functions when grouping to ensure SQL standard compliance (PostgreSQL)
+        if ($iface_search_group_records) {
+            $selectColumns = "
+                MIN($records_table.id) as id,
+                MIN($records_table.domain_id) as domain_id,
+                $records_table.name,
+                $records_table.type,
+                $records_table.content,
+                MIN($records_table.ttl) as ttl,
+                MIN($records_table.prio) as prio,
+                $records_table.disabled,
+                MIN(z.id) as zone_id,
+                MIN(z.owner) as owner,
+                MIN(u.id) as user_id,
+                MIN(u.fullname) as fullname" .
+                ($commentExpr ? ", MIN($commentExpr) AS comment" : "");
+        } else {
+            $selectColumns = "
                 $records_table.id,
                 $records_table.domain_id,
                 $records_table.name,
@@ -81,28 +188,41 @@ class RecordSearch extends BaseSearch
                 $records_table.content,
                 $records_table.ttl,
                 $records_table.prio,
+                $records_table.disabled,
                 z.id as zone_id,
                 z.owner,
                 u.id as user_id,
-                u.fullname
-            FROM
-                $records_table
-            LEFT JOIN zones z on $records_table.domain_id = z.domain_id
-            LEFT JOIN users u on z.owner = u.id
-            WHERE
-                ($records_table.name LIKE " . $this->db->quote($search_string, 'text') . " OR $records_table.content LIKE " . $this->db->quote($search_string, 'text') .
-            ($reverse ? " OR $records_table.name LIKE " . $this->db->quote($reverse_search_string, 'text') . " OR $records_table.content LIKE " . $this->db->quote($reverse_search_string, 'text') : '') . ')' .
-            ($permission_view == 'own' ? 'AND z.owner = ' . $this->db->quote($_SESSION['userid'], 'integer') : '') .
-            ($iface_search_group_records ? " GROUP BY $records_table.name, $records_table.content, $records_table.id, zone_id, user_id" : '') .
+                u.fullname" .
+                ($commentExpr ? ", $commentExpr AS comment" : "");
+        }
+
+        $groupByClause = $iface_search_group_records
+            ? " GROUP BY $records_table.name, $records_table.type, $records_table.content, $records_table.disabled "
+            : '';
+
+        $recordsQuery = "
+        SELECT $selectColumns
+        FROM
+            $records_table
+        LEFT JOIN zones z on $records_table.domain_id = z.domain_id
+        LEFT JOIN users u on z.owner = u.id
+        WHERE
+            " . $this->buildWhereConditionsFetch($records_table, $search_string, $reverse, $reverse_search_string, $iface_record_comments, $parameters, $permission_view, $params) .
+            $typeFilter .
+            $contentFilter .
+            $groupByClause .
             ' ORDER BY ' . $sort_records_by .
             ' LIMIT ' . $iface_rowamount . ' OFFSET ' . $offset;
 
-        $recordsResponse = $this->db->query($recordsQuery);
+        $stmt = $this->db->prepare($recordsQuery);
+        $stmt->execute($params);
+        $recordsResponse = $stmt;
 
         $foundRecords = array();
         while ($record = $recordsResponse->fetch()) {
             $found_record = $record;
-            $found_record['name'] = idn_to_utf8($found_record['name'], IDNA_NONTRANSITIONAL_TO_ASCII);
+            $found_record['name'] = DnsIdnService::toUtf8($found_record['name']);
+            $found_record['disabled'] = $found_record['disabled'] == '1' ? _('Yes') : _('No');
             $foundRecords[] = $found_record;
         }
 
@@ -122,7 +242,7 @@ class RecordSearch extends BaseSearch
         list($reverse_search_string, $parameters, $search_string) = $this->buildSearchString($parameters);
 
         $originalSqlMode = $this->handleSqlMode();
-        $foundRecords = $this->getFoundRecords($search_string, $parameters['reverse'], $reverse_search_string, $permission_view, $iface_search_group_records);
+        $foundRecords = $this->getFoundRecords($parameters, $search_string, $parameters['reverse'], $reverse_search_string, $permission_view, $iface_search_group_records);
         $this->restoreSqlMode($originalSqlMode);
 
         return $foundRecords;
@@ -131,6 +251,7 @@ class RecordSearch extends BaseSearch
     /**
      * Get the total number of found records based on the given search criteria.
      *
+     * @param array $parameters An array of search parameters.
      * @param mixed $search_string The search string to use for matching records.
      * @param bool $reverse Whether to perform a reverse search or not.
      * @param mixed $reverse_search_string The reverse search string to use for matching records.
@@ -138,24 +259,162 @@ class RecordSearch extends BaseSearch
      * @param bool $iface_search_group_records Whether to search group records or not.
      * @return int The total number of found records.
      */
-    public function getFoundRecords(mixed $search_string, bool $reverse, mixed $reverse_search_string, string $permission_view, bool $iface_search_group_records): int
+    public function getFoundRecords(array $parameters, mixed $search_string, bool $reverse, mixed $reverse_search_string, string $permission_view, bool $iface_search_group_records): int
     {
-        $pdns_db_name = $this->config->get('pdns_db_name');
-        $records_table = $pdns_db_name ? $pdns_db_name . '.records' : 'records';
+        $tableNameService = new TableNameService($this->config);
+        $records_table = $tableNameService->getTable(PdnsTable::RECORDS);
+        $groupByClause = $iface_search_group_records
+            ? "GROUP BY $records_table.name, $records_table.type, $records_table.content, $records_table.disabled"
+            : '';
 
+        // Prepare query parameters
+        $params = [];
+
+        // Add type and content filters
+        $typeFilter = '';
+        if (!empty($parameters['type_filter'])) {
+            $typeFilter = " AND $records_table.type = :type_filter";
+            $params[':type_filter'] = $parameters['type_filter'];
+        }
+
+        $contentFilter = '';
+        if (!empty($parameters['content_filter'])) {
+            // Add wildcards automatically if they're not already present
+            $content = $parameters['content_filter'];
+            if (strpos($content, '%') === false) {
+                $content = '%' . $content . '%';
+            }
+            $contentFilter = " AND $records_table.content LIKE :content_filter";
+            $params[':content_filter'] = $content;
+        }
+
+        // Use MIN() aggregate in subquery for SQL standard compliance (PostgreSQL)
+        $innerSelect = $iface_search_group_records
+            ? "MIN($records_table.id)"
+            : "$records_table.id";
+
+        // Build a query that correctly applies permission filters for accurate counting
         $recordsQuery = "
+        SELECT
+            COUNT(*)
+        FROM (
             SELECT
-                COUNT(*)
+                $innerSelect
             FROM
                 $records_table
             LEFT JOIN zones z on $records_table.domain_id = z.domain_id
             LEFT JOIN users u on z.owner = u.id
             WHERE
-                ($records_table.name LIKE " . $this->db->quote($search_string, 'text') . " OR $records_table.content LIKE " . $this->db->quote($search_string, 'text') .
-            ($reverse ? " OR $records_table.name LIKE " . $this->db->quote($reverse_search_string, 'text') . " OR $records_table.content LIKE " . $this->db->quote($reverse_search_string, 'text') : '') . ')' .
-            ($permission_view == 'own' ? 'AND z.owner = ' . $this->db->quote($_SESSION['userid'], 'integer') : '') .
-            ($iface_search_group_records ? " GROUP BY $records_table.name, $records_table.content " : '');
+                " . $this->buildWhereConditionsCount($records_table, $search_string, $reverse, $reverse_search_string, $parameters, $permission_view, $params) .
+            $typeFilter .
+            $contentFilter .
+            " $groupByClause
+        ) as grouped_records";
 
-        return (int)$this->db->queryOne($recordsQuery);
+        $stmt = $this->db->prepare($recordsQuery);
+        $stmt->execute($params);
+        return (int)$stmt->fetchColumn();
+    }
+
+    /**
+     * Build WHERE conditions for fetch records query
+     */
+    private function buildWhereConditionsFetch(string $records_table, mixed $search_string, bool $reverse, mixed $reverse_search_string, bool $iface_record_comments, array $parameters, string $permission_view, array &$params): string
+    {
+        // Add main search parameters
+        $params[':search_string1'] = $search_string;
+        $params[':search_string2'] = $search_string;
+
+        // Build WHERE conditions
+        $whereConditions = "($records_table.name LIKE :search_string1 OR $records_table.content LIKE :search_string2";
+
+        if ($reverse) {
+            $whereConditions .= " OR $records_table.name LIKE :reverse_search_string1 OR $records_table.content LIKE :reverse_search_string2";
+            $params[':reverse_search_string1'] = $reverse_search_string;
+            $params[':reverse_search_string2'] = $reverse_search_string;
+        }
+
+        if ($iface_record_comments && $parameters['comments']) {
+            $tableNameService = new TableNameService($this->config);
+            $comments_table = $tableNameService->getTable(PdnsTable::COMMENTS);
+            $links_table = 'record_comment_links';
+            $db_type = $this->config->get('database', 'type');
+            $castId = DbCompat::castToString($db_type, "$records_table.id");
+            $whereConditions .= " OR EXISTS (
+                SELECT 1 FROM $comments_table c
+                LEFT JOIN $links_table rcl ON rcl.comment_id = c.id
+                WHERE (rcl.record_id = $castId
+                    OR (c.domain_id = $records_table.domain_id AND c.name = $records_table.name AND c.type = $records_table.type))
+                AND c.comment LIKE :search_string_comment
+            )";
+            $params[':search_string_comment'] = $search_string;
+        }
+
+        $whereConditions .= ')';
+
+        if ($permission_view == 'own') {
+            // Check both direct ownership and group ownership
+            $whereConditions .= ' AND (z.owner = :user_id OR EXISTS (
+                SELECT 1 FROM zones_groups zg
+                INNER JOIN user_group_members ugm ON zg.group_id = ugm.group_id
+                WHERE zg.domain_id = ' . $records_table . '.domain_id AND ugm.user_id = :user_id_group
+            ))';
+            $userId = $this->userContext->getLoggedInUserId();
+            $params[':user_id'] = $userId;
+            $params[':user_id_group'] = $userId;
+        }
+
+        return $whereConditions;
+    }
+
+    /**
+     * Build WHERE conditions for count records query
+     */
+    private function buildWhereConditionsCount(string $records_table, mixed $search_string, bool $reverse, mixed $reverse_search_string, array $parameters, string $permission_view, array &$params): string
+    {
+        // Add main search parameters
+        $params[':search_string1'] = $search_string;
+        $params[':search_string2'] = $search_string;
+
+        // Build WHERE conditions
+        $whereConditions = "($records_table.name LIKE :search_string1 OR $records_table.content LIKE :search_string2";
+
+        if ($reverse) {
+            $whereConditions .= " OR $records_table.name LIKE :reverse_search_string1 OR $records_table.content LIKE :reverse_search_string2";
+            $params[':reverse_search_string1'] = $reverse_search_string;
+            $params[':reverse_search_string2'] = $reverse_search_string;
+        }
+
+        if ($parameters['comments']) {
+            $tableNameService = new TableNameService($this->config);
+            $comments_table = $tableNameService->getTable(PdnsTable::COMMENTS);
+            $links_table = 'record_comment_links';
+            $db_type = $this->config->get('database', 'type');
+            $castId = DbCompat::castToString($db_type, "$records_table.id");
+            $whereConditions .= " OR EXISTS (
+                SELECT 1 FROM $comments_table c
+                LEFT JOIN $links_table rcl ON rcl.comment_id = c.id
+                WHERE (rcl.record_id = $castId
+                    OR (c.domain_id = $records_table.domain_id AND c.name = $records_table.name AND c.type = $records_table.type))
+                AND c.comment LIKE :search_string_comment
+            )";
+            $params[':search_string_comment'] = $search_string;
+        }
+
+        $whereConditions .= ')';
+
+        if ($permission_view == 'own') {
+            // Check both direct ownership and group ownership
+            $whereConditions .= ' AND (z.owner = :user_id_count OR EXISTS (
+                SELECT 1 FROM zones_groups zg
+                INNER JOIN user_group_members ugm ON zg.group_id = ugm.group_id
+                WHERE zg.domain_id = ' . $records_table . '.domain_id AND ugm.user_id = :user_id_count_group
+            ))';
+            $userId = $this->userContext->getLoggedInUserId();
+            $params[':user_id_count'] = $userId;
+            $params[':user_id_count_group'] = $userId;
+        }
+
+        return $whereConditions;
     }
 }

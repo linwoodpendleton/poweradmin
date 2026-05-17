@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2026 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -25,128 +25,312 @@
  *
  * @package     Poweradmin
  * @copyright   2007-2010 Rejo Zenger <rejo@zenger.nl>
- * @copyright   2010-2024 Poweradmin Development Team
+ * @copyright   2010-2025 Poweradmin Development Team
  * @license     https://opensource.org/licenses/GPL-3.0 GPL
  */
 
 namespace Poweradmin\Application\Controller;
 
-use Poweradmin\Application\Presenter\ErrorPresenter;
 use Poweradmin\Application\Service\DnssecProviderFactory;
+use Poweradmin\Application\Service\RecordCommentService;
+use Poweradmin\Application\Service\RecordCommentSyncService;
+use Poweradmin\Domain\Service\UserContextService;
 use Poweradmin\BaseController;
-use Poweradmin\Domain\Error\ErrorMessage;
-use Poweradmin\Domain\Model\Permission;
-use Poweradmin\Domain\Model\RecordType;
+use Poweradmin\Domain\Utility\DnsHelper;
+use Poweradmin\Domain\Utility\RecordIdHelper;
 use Poweradmin\Domain\Model\UserManager;
+use Poweradmin\Domain\Service\DnsIdnService;
 use Poweradmin\Domain\Service\DnsRecord;
+use Poweradmin\Domain\Model\RecordType;
+use Poweradmin\Domain\Service\RecordTypeService;
+use Poweradmin\Domain\Service\Validator;
+use Poweradmin\Domain\ValueObject\RecordIdentifier;
 use Poweradmin\Infrastructure\Logger\LegacyLogger;
+use Poweradmin\Domain\Repository\RecordRepositoryInterface;
+use Poweradmin\Infrastructure\Utility\IpAddressRetriever;
 
 class EditRecordController extends BaseController
 {
 
-    private LegacyLogger $logger;
+    private LegacyLogger $auditLogger;
+    private RecordCommentService $recordCommentService;
+    private RecordCommentSyncService $commentSyncService;
+    private RecordTypeService $recordTypeService;
+    private UserContextService $userContextService;
+    private IpAddressRetriever $ipAddressRetriever;
+    private RecordRepositoryInterface $recordRepository;
 
     public function __construct(array $request)
     {
         parent::__construct($request);
 
-        $this->logger = new LegacyLogger($this->db);
+        $this->auditLogger = new LegacyLogger($this->db);
+        $this->ipAddressRetriever = new IpAddressRetriever($_SERVER);
+        $backendProvider = $this->createDnsBackendProvider();
+        $repositoryFactory = $this->getRepositoryFactory($backendProvider);
+        $recordCommentRepository = $repositoryFactory->createRecordCommentRepository();
+        $this->recordCommentService = new RecordCommentService($recordCommentRepository);
+        $this->recordRepository = $repositoryFactory->createRecordRepository();
+        $this->commentSyncService = new RecordCommentSyncService($this->recordCommentService, $this->recordRepository, $backendProvider);
+        $this->recordTypeService = new RecordTypeService($this->getConfig());
+        $this->userContextService = new UserContextService();
     }
 
     public function run(): void
     {
-        $perm_view = Permission::getViewPermission($this->db);
-        $perm_edit = Permission::getEditPermission($this->db);
-
-        $record_id = $_GET['id'];
+        // Validate record ID parameter
+        $record_id = $this->getSafeRequestValue('id');
+        if (!$record_id || (!Validator::isNumber($record_id) && !RecordIdentifier::isEncoded($record_id))) {
+            $this->showError(_('Invalid record ID.'));
+            return;
+        }
+        if (Validator::isNumber($record_id)) {
+            $record_id = (int)$record_id;
+        }
         $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-        $zid = $dnsRecord->get_zone_id_from_record_id($record_id);
 
-        $user_is_zone_owner = UserManager::verify_user_is_owner_zoneid($this->db, $zid);
-
-        $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-        $zone_type = $dnsRecord->get_domain_type($zid);
-
-        if ($perm_view == "none" || $perm_view == "own" && $user_is_zone_owner == "0") {
-            $this->showError(_("You do not have the permission to view this record."));
+        // Get zone ID from record first
+        $zid = $dnsRecord->getZoneIdFromRecordId($record_id);
+        if ($zid == null) {
+            $this->showError(_('Invalid record ID.'));
+            return;
         }
 
-        if ($zone_type == "SLAVE" || $perm_edit == "none" || ($perm_edit == "own" || $perm_edit == "own_as_client") && $user_is_zone_owner == "0") {
-            $error = new ErrorMessage(_("You do not have the permission to edit this record."));
-            $errorPresenter = new ErrorPresenter();
-            $errorPresenter->present($error);
+        // Early permission check - validate access before further operations
+        $userId = $this->userContextService->getLoggedInUserId();
+        $user_is_zone_owner = UserManager::verifyUserIsOwnerZoneId($this->db, $zid);
+
+        // Check view permission first (zone-aware for group support)
+        $canView = UserManager::canUserPerformZoneAction($this->db, $userId, $zid, 'zone_content_view_own');
+        $canViewOthers = UserManager::verifyPermission($this->db, 'zone_content_view_others');
+
+        if (!$canViewOthers && !$canView) {
+            $this->showError(_("You do not have permission to view this record."));
+            return;
         }
 
+        // Get zone type after permission validation
+        $zone_type = $dnsRecord->getDomainType($zid);
+
+        // Check edit permission for SLAVE zones and zone-specific edit rights
+        if ($zone_type == "SLAVE") {
+            $this->showError(_("You cannot edit records in a SLAVE zone."));
+            return;
+        }
+
+        // Check zone-specific edit permission (includes group permissions)
+        $canEdit = UserManager::canUserPerformZoneAction($this->db, $userId, $zid, 'zone_content_edit_own');
+        $canEditAsClient = UserManager::canUserPerformZoneAction($this->db, $userId, $zid, 'zone_content_edit_own_as_client');
+        $canEditOthers = UserManager::verifyPermission($this->db, 'zone_content_edit_others');
+
+        if (!$canEditOthers && !$canEdit && !$canEditAsClient) {
+            $this->showError(_("You do not have permission to edit this record."));
+            return;
+        }
+
+        // Determine permission level for UI (for backward compatibility with templates)
+        $perm_edit = 'none';
+        if ($canEditOthers) {
+            $perm_edit = 'all';
+        } elseif ($canEdit) {
+            $perm_edit = 'own';
+        } elseif ($canEditAsClient) {
+            $perm_edit = 'own_as_client';
+        }
+
+        $validationFailed = false;
         if ($this->isPost()) {
             $this->validateCsrfToken();
-            $this->saveRecord($zid);
+            $validationFailed = !$this->saveRecord($zid);
         }
 
-        $this->showRecordEditForm($record_id, $zone_type, $zid, $perm_edit, $user_is_zone_owner);
+        $this->showRecordEditForm($record_id, $zone_type, $zid, $perm_edit, $user_is_zone_owner, $validationFailed);
     }
 
-    public function showRecordEditForm($record_id, string $zone_type, $zid, string $perm_edit, $user_is_zone_owner): void
+    public function showRecordEditForm($record_id, string $zone_type, $zid, string $perm_edit, $user_is_zone_owner, bool $validationFailed = false): void
     {
         $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-        $zone_name = $dnsRecord->get_domain_name_by_id($zid);
+        $zone_name = $dnsRecord->getDomainNameById($zid);
 
-        $recordTypes = RecordType::getTypes();
-        $record = $dnsRecord->get_record_from_id($record_id);
-        $record['record_name'] = trim(str_replace(htmlspecialchars($zone_name), '', htmlspecialchars($record["name"])), '.');
+        $recordTypes = $this->recordTypeService->getAllTypes($this->getPdnsCapabilities());
+        $record = $dnsRecord->getRecordFromId($record_id);
+        if ($record === null) {
+            $this->showError(_('Record not found.'));
+            return;
+        }
+
+        $display_hostname_only = $this->createUserPreferenceService()->getDisplayHostnameOnly(
+            $this->userContextService->getLoggedInUserId()
+        );
+        if ($display_hostname_only) {
+            $record['record_name'] = DnsHelper::stripZoneSuffix($record['name'], $zone_name);
+        }
 
         if (str_starts_with($zone_name, "xn--")) {
-            $idn_zone_name = idn_to_utf8($zone_name, IDNA_NONTRANSITIONAL_TO_ASCII);
+            $idn_zone_name = DnsIdnService::toUtf8($zone_name);
         } else {
             $idn_zone_name = "";
+        }
+
+        $iface_record_comments = $this->config->get('interface', 'show_record_comments', false);
+        // Use record ID to find per-record comment, with fallback to RRset-based lookup for legacy comments
+        $recordComment = $this->recordCommentService->findCommentByRecordId($record_id);
+        if ($recordComment === null) {
+            // Fallback to legacy RRset-based comment lookup
+            $recordComment = $this->recordCommentService->findComment($zid, $record['name'], $record['type']);
         }
 
         $this->render('edit_record.html', [
             'record_id' => $record_id,
             'record' => $record,
             'recordTypes' => $recordTypes,
+            'deprecated_types' => RecordType::DEPRECATED_TYPES,
             'zone_name' => $zone_name,
             'idn_zone_name' => $idn_zone_name,
             'zone_type' => $zone_type,
             'zid' => $zid,
             'perm_edit' => $perm_edit,
             'user_is_zone_owner' => $user_is_zone_owner,
+            'iface_record_comments' => $iface_record_comments,
+            'comment' => $recordComment ? $recordComment->getComment() : '',
+            'is_reverse_zone' => DnsHelper::isReverseZone($zone_name),
+            'display_hostname_only' => $display_hostname_only,
         ]);
     }
 
-    public function saveRecord($zid): void
+    public function saveRecord($zid): bool
     {
         $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-        $old_record_info = $dnsRecord->get_record_from_id($_POST["rid"]);
+        $old_record_info = $dnsRecord->getRecordFromId($_POST["rid"]);
+        if ($old_record_info === null) {
+            $this->setMessage('edit', 'error', _('Record not found.'));
+            return false;
+        }
 
         $postData = $_POST;
+
+        // Convert IDN record name and content to punycode
+        if (isset($postData['name'])) {
+            $postData['name'] = DnsIdnService::toPunycode($postData['name']);
+        }
+        if (isset($postData['content']) && isset($postData['type'])) {
+            $postData['content'] = DnsIdnService::convertContentToPunycode($postData['type'], $postData['content']);
+        }
+
+        // Normalize record name to full FQDN (always, regardless of display setting)
+        // This converts @ to zone apex and ensures proper zone suffix
+        if (isset($postData['name'])) {
+            $zone_name = $dnsRecord->getDomainNameById($zid);
+            if ($zone_name === null) {
+                $this->setMessage('edit', 'error', _('Zone not found.'));
+                return false;
+            }
+            $postData['name'] = DnsHelper::restoreZoneSuffix($postData['name'], $zone_name);
+        }
         if (isset($postData['disabled']) && $postData['disabled'] == "on") {
             $postData['disabled'] = 1;
         } else {
             $postData['disabled'] = 0;
         }
 
-        $ret_val = $dnsRecord->edit_record($postData);
-        if ($ret_val) {
-            $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-            $dnsRecord->update_soa_serial($zid);
+        $ret_val = $dnsRecord->editRecord($postData);
+        if (!$ret_val) {
+            return false;
+        }
 
-            $new_record_info = $dnsRecord->get_record_from_id($_POST["rid"]);
-            $this->logger->log_info(sprintf('client_ip:%s user:%s operation:edit_record'
+        $dnsRecord->updateSOASerial($zid);
+
+        $new_record_info = $dnsRecord->getRecordFromId($_POST["rid"]);
+        if ($new_record_info === null) {
+            // In API mode the record ID changes when name/type/content/prio change,
+            // so the old ID won't match. Use POST data for audit logging instead.
+            $new_record_info = [
+                'type' => $postData['type'],
+                'name' => $postData['name'],
+                'content' => $postData['content'],
+                'ttl' => $postData['ttl'],
+                'prio' => $postData['prio'] ?? 0,
+            ];
+        }
+
+        $this->auditLogger->logInfo(
+            sprintf(
+                'client_ip:%s user:%s operation:edit_record'
                 . ' old_record_type:%s old_record:%s old_content:%s old_ttl:%s old_priority:%s'
                 . ' record_type:%s record:%s content:%s ttl:%s priority:%s',
-                $_SERVER['REMOTE_ADDR'], $_SESSION["userlogin"],
-                $old_record_info['type'], $old_record_info['name'], $old_record_info['content'], $old_record_info['ttl'], $old_record_info['prio'],
-                $new_record_info['type'], $new_record_info['name'], $new_record_info['content'], $new_record_info['ttl'], $new_record_info['prio']),
-                $zid);
+                $this->ipAddressRetriever->getClientIp(),
+                $this->userContextService->getLoggedInUsername(),
+                $old_record_info['type'],
+                $old_record_info['name'],
+                $old_record_info['content'],
+                $old_record_info['ttl'],
+                $old_record_info['prio'],
+                $new_record_info['type'],
+                $new_record_info['name'],
+                $new_record_info['content'],
+                $new_record_info['ttl'],
+                $new_record_info['prio']
+            ),
+            $zid
+        );
 
-            if ($this->config('pdnssec_use')) {
-                $zone_name = $dnsRecord->get_domain_name_by_id($zid);
+        $showRecordComments = $this->config->get('interface', 'show_record_comments', false);
+        $nameOrTypeChanged = ($old_record_info['name'] !== $new_record_info['name'] ||
+                              $old_record_info['type'] !== $new_record_info['type']);
+
+        if ($showRecordComments) {
+            // Comments visible - use per-record comment (linked by record ID via record_comment_links table)
+            $commentValue = $_POST['comment'] ?? '';
+
+            $this->recordCommentService->updateCommentForRecord(
+                $zid,
+                $new_record_info['name'],
+                $new_record_info['type'],
+                $commentValue,
+                RecordIdHelper::normalizeId($_POST['rid']),
+                $this->userContextService->getLoggedInUsername()
+            );
+
+            if ($this->config->get('misc', 'record_comments_sync')) {
+                $this->commentSyncService->updateRelatedRecordComments(
+                    $dnsRecord,
+                    $new_record_info,
+                    $commentValue,
+                    $this->userContextService->getLoggedInUsername()
+                );
+            }
+        } elseif ($nameOrTypeChanged) {
+            // Comments hidden but record name/type changed - migrate existing comment
+            $existingComment = $this->recordCommentService->findComment(
+                $zid,
+                $old_record_info['name'],
+                $old_record_info['type']
+            );
+
+            if ($existingComment !== null) {
+                $this->recordCommentService->updateComment(
+                    $zid,
+                    $old_record_info['name'],
+                    $old_record_info['type'],
+                    $new_record_info['name'],
+                    $new_record_info['type'],
+                    $existingComment->getComment(),
+                    $this->userContextService->getLoggedInUsername()
+                );
+            }
+        }
+
+        if ($this->config->get('dnssec', 'enabled', false)) {
+            $zone_name = $dnsRecord->getDomainNameById($zid);
+            if ($zone_name !== null) {
                 $dnssecProvider = DnssecProviderFactory::create($this->db, $this->getConfig());
                 $dnssecProvider->rectifyZone($zone_name);
             }
-
-            $this->setMessage('edit', 'success', _('The record has been updated successfully.'));
-            $this->redirect('index.php', ['page'=> 'edit', 'id' => $zid]);
         }
+
+        $this->setMessage('edit', 'success', _('The record has been updated successfully.'));
+        $this->redirect('/zones/' . $zid . '/edit');
+
+        return true;
     }
 }

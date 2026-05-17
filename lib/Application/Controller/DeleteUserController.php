@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -25,39 +25,62 @@
  *
  * @package     Poweradmin
  * @copyright   2007-2010 Rejo Zenger <rejo@zenger.nl>
- * @copyright   2010-2024 Poweradmin Development Team
+ * @copyright   2010-2025 Poweradmin Development Team
  * @license     https://opensource.org/licenses/GPL-3.0 GPL
  */
 
 namespace Poweradmin\Application\Controller;
 
 use Poweradmin\BaseController;
+use Poweradmin\Domain\Model\Constants;
 use Poweradmin\Domain\Model\UserEntity;
 use Poweradmin\Domain\Model\UserManager;
-use Poweradmin\Domain\Service\DnsRecord;
+use Poweradmin\Domain\Service\UserContextService;
 use Poweradmin\Domain\Service\Validator;
+use Poweradmin\Infrastructure\Logger\LegacyLogger;
+use Poweradmin\Infrastructure\Utility\IpAddressRetriever;
 
 class DeleteUserController extends BaseController
 {
+    private LegacyLogger $auditLogger;
+    private UserContextService $userContextService;
+    private IpAddressRetriever $ipAddressRetriever;
+
+    public function __construct(array $request)
+    {
+        parent::__construct($request);
+
+        $this->auditLogger = new LegacyLogger($this->db);
+        $this->userContextService = new UserContextService();
+        $this->ipAddressRetriever = new IpAddressRetriever($_SERVER);
+    }
 
     public function run(): void
     {
-        $perm_edit_others = UserManager::verify_permission($this->db, 'user_edit_others');
-        $perm_is_godlike = UserManager::verify_permission($this->db, 'user_is_ueberuser');
+        $perm_edit_others = UserManager::verifyPermission($this->db, 'user_edit_others');
+        $perm_is_godlike = UserManager::verifyPermission($this->db, 'user_is_ueberuser');
 
-        if (!(isset($_GET['id']) && Validator::is_number($_GET['id']))) {
+        $uid = $this->getSafeRequestValue('id');
+        if (!$uid || !Validator::isNumber($uid)) {
             $this->showError(_('Invalid or unexpected input given.'));
         }
 
-        $uid = htmlspecialchars($_GET['id']);
+        // Check basic permissions first
+        if (($uid != $_SESSION['userid'] && !$perm_edit_others) || ($uid == $_SESSION['userid'] && !$perm_is_godlike)) {
+            $this->showError(_("You do not have the permission to delete this user."));
+        }
 
+        // Prevent non-superusers from deleting superuser accounts (privilege escalation protection)
+        $targetIsSuperuser = UserManager::isUserSuperuser($this->db, $uid);
+
+        if ($targetIsSuperuser && !$perm_is_godlike) {
+            $this->showError(_('You do not have permission to delete a superuser account.'));
+        }
+
+        // All permission checks passed, now handle POST request
         if ($this->isPost()) {
             $this->validateCsrfToken();
             $this->deleteUser($uid);
-        }
-
-        if (($uid != $_SESSION['userid'] && !$perm_edit_others) || ($uid == $_SESSION['userid'] && !$perm_is_godlike)) {
-            $this->showError(_("You do not have the permission to delete this user."));
         }
 
         $this->showQuestion($uid);
@@ -65,9 +88,12 @@ class DeleteUserController extends BaseController
 
     public function deleteUser(string $uid): void
     {
-        if (!UserManager::is_valid_user($this->db, $uid)) {
+        if (!UserManager::isValidUser($this->db, $uid)) {
             $this->showError(_('User does not exist.'));
         }
+
+        // Capture username before deletion since user won't exist after
+        $targetUsername = UserEntity::getUserNameById($this->db, $uid);
 
         $zones = array();
         if (isset($_POST['zone'])) {
@@ -75,24 +101,32 @@ class DeleteUserController extends BaseController
         }
 
         $legacyUsers = new UserManager($this->db, $this->getConfig());
-        if ($legacyUsers->delete_user($uid, $zones)) {
+        if ($legacyUsers->deleteUser($uid, $zones)) {
+            $this->auditLogger->logInfo(sprintf(
+                'client_ip:%s user:%s operation:delete_user target_user:%s',
+                $this->ipAddressRetriever->getClientIp(),
+                $this->userContextService->getLoggedInUsername(),
+                $targetUsername
+            ));
+
             $this->setMessage('users', 'success', _('The user has been deleted successfully.'));
-            $this->redirect('index.php', ['page'=> 'users']);
+            $this->redirect('/users');
         }
     }
 
     public function showQuestion(string $uid): void
     {
-        $name = UserManager::get_fullname_from_userid($this->db, $uid);
+        $name = UserManager::getFullnameFromUserId($this->db, $uid);
         if (!$name) {
-            $name = UserEntity::get_username_by_id($this->db, $uid);
+            $name = UserEntity::getUserNameById($this->db, $uid);
         }
-        $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-        $zones = $dnsRecord->get_zones("own", $uid);
+        $repositoryFactory = $this->getRepositoryFactory();
+        $domainRepository = $repositoryFactory->createDomainRepository();
+        $zones = $domainRepository->getZones("own", (int)$uid, 'all', 0, Constants::DEFAULT_MAX_ROWS, 'name', 'ASC', false, null, null, false);
 
         $users = [];
         if (count($zones) > 0) {
-            $users = UserManager::show_users($this->db);
+            $users = UserManager::showUsers($this->db);
         }
 
         $this->render('delete_user.html', [

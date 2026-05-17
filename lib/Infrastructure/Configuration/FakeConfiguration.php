@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -26,14 +26,42 @@ class FakeConfiguration implements ConfigurationInterface
 {
     protected array $config;
 
-    public function __construct(?string $pdns_api_url, ?string $pdns_api_key)
+    public function __construct(array $config = [])
     {
-        $this->config['pdns_api_url'] = $pdns_api_url;
-        $this->config['pdns_api_key'] = $pdns_api_key;
+        $this->config = $config;
     }
 
-    public function get($name): mixed
+    /**
+     * Gets a configuration value.
+     *
+     * @param string $group Configuration group
+     * @param string $key Configuration key
+     * @param mixed $default Default value if not found
+     * @return mixed Configuration value or default if not found
+     */
+    public function get(string $group, string $key, mixed $default = null): mixed
     {
-        return array_key_exists($name, $this->config) ? $this->config[$name] : null;
+        return $this->config[$group][$key] ?? $default;
+    }
+
+    /**
+     * Gets an entire configuration group.
+     *
+     * @param string $group Configuration group
+     * @return array Configuration group values
+     */
+    public function getGroup(string $group): array
+    {
+        return $this->config[$group] ?? [];
+    }
+
+    /**
+     * Gets all configuration settings.
+     *
+     * @return array All settings
+     */
+    public function getAll(): array
+    {
+        return $this->config;
     }
 }

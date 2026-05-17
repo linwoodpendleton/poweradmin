@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2026 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -22,260 +22,995 @@
 
 namespace Poweradmin;
 
-use Poweradmin\Application\Presenter\ErrorPresenter;
+use InvalidArgumentException;
+use Poweradmin\Application\Service\ApiStatusService;
+use Poweradmin\Application\Service\AuditService;
 use Poweradmin\Application\Service\CsrfTokenService;
-use Poweradmin\Domain\Error\ErrorMessage;
+use Poweradmin\Application\Service\DnsBackendProviderFactory;
+use Poweradmin\Application\Service\DnsDataService;
+use Poweradmin\Application\Service\PaginationService;
+use Poweradmin\Application\Service\PdnsVersionService;
+use Poweradmin\Application\Service\RepositoryFactory;
 use Poweradmin\Domain\Model\UserManager;
-use Poweradmin\Infrastructure\Database\PDOLayer;
-use Poweradmin\Infrastructure\Service\ThemeManager;
-use Valitron;
+use Poweradmin\Domain\Service\MfaSessionManager;
+use Poweradmin\Domain\Service\PdnsCapabilities;
+use Poweradmin\Domain\Service\UserAvatarService;
+use Poweradmin\Domain\Service\UserContextService;
+use Poweradmin\Domain\Service\UserPreferenceService;
+use Poweradmin\Domain\Service\UserTimezoneService;
+use PDO;
+use Poweradmin\Infrastructure\Configuration\ConfigurationManager;
+use Poweradmin\Infrastructure\Logger\Logger;
+use Poweradmin\Infrastructure\Logger\LoggerHandlerFactory;
+use Poweradmin\Infrastructure\Repository\DbUserPreferenceRepository;
+use Poweradmin\Domain\Repository\ZoneRepositoryInterface;
+use Poweradmin\Infrastructure\Service\ApiKeyAuthenticationMiddleware;
+use Poweradmin\Domain\Service\DnsBackendProvider;
+use Poweradmin\Infrastructure\Service\MessageService;
+use Poweradmin\Infrastructure\Service\StyleManager;
+use Poweradmin\Module\ModuleRegistry;
+use Poweradmin\Version;
+use Psr\Log\LoggerInterface;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\Validator\Constraints as Assert;
+use Symfony\Component\Validator\ConstraintViolationListInterface;
+use Symfony\Component\Validator\Validation;
+use Symfony\Component\Validator\Validator\ValidatorInterface;
 
+/**
+ * Abstract class BaseController
+ *
+ * Provides common functionality for all controllers in the Poweradmin application.
+ */
 abstract class BaseController
 {
     private AppManager $app;
     private AppInitializer $init;
-    protected PDOLayer $db;
-    private array $request;
-    private Valitron\Validator $validator;
+    protected PDO $db;
+    protected array $requestData;
+    private ValidatorInterface $validator;
+    private array $validationConstraints = [];
     private CsrfTokenService $csrfTokenService;
+    protected MessageService $messageService;
+    protected ConfigurationManager $config;
+    private UserContextService $userContextService;
+    private string $pageTitle = '';
+    protected LoggerInterface $logger;
 
+    /**
+     * Abstract method to be implemented by subclasses to run the controller logic.
+     */
     abstract public function run(): void;
 
+    /**
+     * Constructor for BaseController.
+     *
+     * @param array $request The request data.
+     * @param bool $authenticate Whether to authenticate the user.
+     */
     public function __construct(array $request, bool $authenticate = true)
     {
-        $this->app = AppFactory::create();
+        // Create logger early so AppManager and ConfigurationManager can use it
+        $this->config = ConfigurationManager::getInstance();
+        $this->config->initialize();
+
+        $logHandler = LoggerHandlerFactory::create($this->config->getAll());
+        $logLevel = $this->config->get('logging', 'level', 'info');
+        $this->logger = new Logger($logHandler, $logLevel);
+
+        $this->config->setLogger($this->logger);
+        $this->app = new AppManager($this->logger);
 
         $this->init = new AppInitializer($authenticate);
         $this->db = $this->init->getDb();
 
-        $this->request = $request;
-        $this->validator = new Valitron\Validator($this->getRequest());
+        $this->requestData = $request;
+        $this->validator = Validation::createValidator();
 
         $this->csrfTokenService = new CsrfTokenService();
+        $this->messageService = new MessageService();
+        $this->userContextService = new UserContextService();
+
+        // If we're in an API context and the user is not authenticated,
+        // check for API key authentication (but only for internal API routes)
+        if ($authenticate && !$this->userContextService->isAuthenticated() && $this->isInternalApiRoute()) {
+            $this->tryApiKeyAuthentication();
+        }
+
+        // Check for MFA requirement for regular controllers using our centralized manager
+        if ($authenticate && !$this->isApiRequest() && $this->userContextService->isAuthenticated()) {
+            $currentPage = $request['page'] ?? '';
+
+            // Use our centralized MFA session manager to check if verification is required
+            if (MfaSessionManager::isMfaRequired() && $currentPage !== 'mfa_verify') {
+                // Ensure session is written before redirecting
+                session_write_close();
+
+                // Build redirect URL with base_url_prefix support
+                $baseUrlPrefix = $this->config->get('interface', 'base_url_prefix', '');
+                $redirectUrl = $baseUrlPrefix . '/mfa/verify';
+                header("Location: $redirectUrl");
+                exit;
+            }
+        }
     }
 
+    /**
+     * Checks if the current request is any API route
+     *
+     * @return bool True if this is an API request, false otherwise
+     */
+    protected function isApiRequest(): bool
+    {
+        $page = $this->requestData['page'] ?? '';
+        return str_starts_with($page, 'api/');
+    }
+
+    /**
+     * Checks if the current request expects a JSON response
+     * This is more comprehensive than just checking the route
+     *
+     * @return bool True if this request expects JSON, false otherwise
+     */
+    public static function expectsJson(): bool
+    {
+        // Check if it's an API route
+        $requestUri = $_SERVER['REQUEST_URI'] ?? '';
+        if (str_contains($requestUri, '/api/')) {
+            return true;
+        }
+
+        // Check Accept header
+        $acceptHeader = $_SERVER['HTTP_ACCEPT'] ?? '';
+        if (str_contains($acceptHeader, 'application/json') && !str_contains($acceptHeader, 'text/html')) {
+            return true;
+        }
+
+        // Check if it's an AJAX request
+        if (
+            isset($_SERVER['HTTP_X_REQUESTED_WITH']) &&
+            strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest'
+        ) {
+            return true;
+        }
+
+        // Check Content-Type for JSON requests
+        $contentType = $_SERVER['CONTENT_TYPE'] ?? $_SERVER['HTTP_CONTENT_TYPE'] ?? '';
+        if (str_contains($contentType, 'application/json')) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Checks if the current request is an internal API route (api/internal/*)
+     *
+     * @return bool True if this is an internal API route, false otherwise
+     */
+    protected function isInternalApiRoute(): bool
+    {
+        $page = $this->requestData['page'] ?? '';
+        return str_starts_with($page, 'api/internal/');
+    }
+
+    /**
+     * Checks if the current request is a public API route (api/v1/*, api/v2/*, etc.)
+     *
+     * @return bool True if this is a public API route, false otherwise
+     */
+    protected function isPublicApiRoute(): bool
+    {
+        $page = $this->requestData['page'] ?? '';
+
+        // Check if this is an API route
+        if (!str_starts_with($page, 'api/')) {
+            return false;
+        }
+
+        // Extract the API version from the route
+        $parts = explode('/', $page);
+        if (count($parts) < 2) {
+            return false;
+        }
+
+        // Check if the second part is a version indicator (v1, v2, etc.)
+        $versionPart = $parts[1] ?? '';
+        return preg_match('/^v\d+$/i', $versionPart) === 1;
+    }
+
+    /**
+     * Tries to authenticate using API key
+     * Only used for internal API routes by default
+     */
+    protected function tryApiKeyAuthentication(): void
+    {
+        // Check if API functionality is enabled (which includes API keys)
+        if (!$this->config->get('api', 'enabled', false)) {
+            return;
+        }
+
+        // Create API key middleware
+        $middleware = new ApiKeyAuthenticationMiddleware($this->db, $this->config);
+
+        // Create request object from globals
+        $request = Request::createFromGlobals();
+
+        // Try to authenticate
+        $middleware->process($request);
+    }
+
+    /**
+     * Checks if the current request is a POST request.
+     *
+     * @return bool True if the request method is POST, false otherwise.
+     */
     public function isPost(): bool
     {
         return $_SERVER['REQUEST_METHOD'] === 'POST';
     }
 
-    public function getConfig(): AppConfiguration
+    /**
+     * Gets the application configuration.
+     *
+     * @return ConfigurationManager The application configuration.
+     */
+    public function getConfig(): ConfigurationManager
     {
-        return $this->app->getConfig();
+        return $this->config;
     }
 
-    public function config(string $key): mixed
+    /**
+     * Get a module config value with legacy fallback.
+     *
+     * Checks modules.<module>.<key> first, then falls back to <module>.<key>
+     * for backward compatibility with pre-module config layouts.
+     */
+    protected function getModuleConfig(string $module, string $key, mixed $default = null): mixed
     {
-        return $this->app->config($key);
+        $value = $this->config->get('modules', "$module.$key", null);
+        if ($value !== null) {
+            return $value;
+        }
+        return $this->config->get($module, $key, $default);
     }
 
+    /**
+     * Renders a template with the given parameters.
+     *
+     * @param string $template The template to render.
+     * @param array $params The parameters to pass to the template.
+     */
     public function render(string $template, array $params): void
     {
-        $this->renderHeader();
+        // Get system messages before rendering
+        $systemMessages = $this->messageService->getMessages('system');
+
+        // Pass system messages to header template
+        $this->renderHeader($systemMessages);
+
+        // Show template-specific messages
         $this->showMessage($template);
+
+        // Render main template
+        // Ensure CSRF token exists, generate one if missing
+        $this->csrfTokenService->ensureTokenExists();
         $params['csrf_token'] = $this->csrfTokenService->getToken();
+
+        // Add base_url_prefix for subfolder deployment support
+        $params['base_url_prefix'] = $this->config->get('interface', 'base_url_prefix', '');
+
+        // Expose connected PowerDNS capabilities to every template so views
+        // can adapt (record types, zone kinds, terminology, etc).
+        if (!array_key_exists('pdns_caps', $params)) {
+            $params['pdns_caps'] = $this->getPdnsCapabilities();
+        }
+        if (!array_key_exists('pdns_server_info', $params)) {
+            $params['pdns_server_info'] = PdnsVersionService::getCachedInfo();
+        }
+
         $this->app->render($template, $params);
         $this->renderFooter();
     }
 
+    /**
+     * Build a PdnsCapabilities snapshot from the session-cached PowerDNS
+     * version. Constant-time and synchronous - never triggers detection,
+     * never makes a network call. Safe to call from render() on every page.
+     *
+     * Controllers that want a freshly-detected version should call
+     * refreshPdnsCapabilities() explicitly before rendering so they own
+     * the latency cost rather than imposing it on every other page.
+     */
+    protected function getPdnsCapabilities(): PdnsCapabilities
+    {
+        $info = PdnsVersionService::getCachedInfo();
+        return PdnsCapabilities::fromVersion($info['version'] ?? null);
+    }
+
+    /**
+     * Trigger a session-cached refresh of PowerDNS version + capabilities.
+     *
+     * Makes at most one API call per minute (rate-limited via the session
+     * timestamp `pdns_version_last_attempt`) and is a no-op on non-API
+     * backends. Call from controllers that need an up-to-date capability
+     * snapshot - e.g. the dashboard. Page renders that don't call this just
+     * read whatever is already cached.
+     */
+    protected function refreshPdnsCapabilities(): void
+    {
+        if (!DnsBackendProviderFactory::isApiBackend($this->config)) {
+            return;
+        }
+        $last = $_SESSION['pdns_version_last_attempt'] ?? 0;
+        if ((time() - (int) $last) < 60) {
+            return;
+        }
+        $_SESSION['pdns_version_last_attempt'] = time();
+        try {
+            $apiClient = DnsBackendProviderFactory::createApiClient($this->config, $this->logger);
+            if ($apiClient !== null) {
+                (new PdnsVersionService($apiClient, $this->logger))->detect();
+            }
+        } catch (\Throwable $e) {
+            // Detection failures are non-fatal - the UI just falls back to
+            // whatever's already cached (or strict-unknown). Log at debug
+            // to avoid noise during outages.
+            $this->logger->debug('PowerDNS version detection failed: {error}', ['error' => $e->getMessage()]);
+        }
+    }
+
+    /**
+     * Validates the CSRF token from the request.
+     */
     public function validateCsrfToken(): void
     {
+        if (!$this->config->get('security', 'global_token_validation', true)) {
+            return;
+        }
+
         $token = $this->getSafeRequestValue('_token');
         if (!$this->csrfTokenService->validateToken($token)) {
-            $error = new ErrorMessage(_('Invalid CSRF token.'));
-            $errorPresenter = new ErrorPresenter();
-            $errorPresenter->present($error);
-
+            $this->renderHeader();
+            $this->messageService->addSystemError(_('Invalid CSRF token.'));
+            $this->renderFooter();
             exit;
         }
     }
 
-    public function redirect($script, $args = []): void
+    /**
+     * Redirects to a specified URL with optional arguments.
+     * Automatically prepends base_url_prefix for subfolder deployments.
+     *
+     * @param string $url The URL to redirect to.
+     * @param array $args The arguments to pass as query parameters.
+     */
+    public function redirect(string $url, array $args = []): void
     {
-        $args['time'] = time();
-        $url = htmlentities($script, ENT_QUOTES) . "?" . http_build_query($args);
-        header("Location: $url");
-        exit;
-    }
-
-    public function setMessage($script, $type, $content): void
-    {
-        $_SESSION['messages'][$script] = [
-            'type' => $type,
-            'content' => $content
-        ];
-    }
-
-    public function getMessage($script): mixed
-    {
-        if (isset($_SESSION['messages'][$script])) {
-            $messages = $_SESSION['messages'][$script];
-            unset($_SESSION['messages'][$script]);
-            return $messages;
+        // Clean URL implementation - all URLs should start with '/'
+        if (!str_starts_with($url, '/')) {
+            throw new InvalidArgumentException("URL must start with '/'. Got: $url");
         }
-        return null;
-    }
 
-    public function showMessage($template): void
-    {
-        $script = pathinfo($template)['filename'];
-
-        $message = $this->getMessage($script);
-        if ($message) {
-            $alertClass = match ($message['type']) {
-                'error' => 'alert-danger',
-                'warn' => 'alert-warning',
-                'success' => 'alert-success',
-                'info' => 'alert-info',
-                default => '',
-            };
-
-            echo <<<EOF
-<div class="alert $alertClass alert-dismissible fade show" role="alert">{$message['content']}
-    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-</div>
-EOF;
+        // Prepend base_url_prefix for subfolder deployments
+        $baseUrlPrefix = $this->config->get('interface', 'base_url_prefix', '');
+        if (!empty($baseUrlPrefix)) {
+            $url = $baseUrlPrefix . $url;
         }
+
+        // Add query parameters if provided
+        if (!empty($args)) {
+            $url .= '?' . http_build_query($args);
+        }
+
+        $this->sendRedirect($url);
     }
 
+    /**
+     * Sets a message to be displayed for a specific script.
+     *
+     * @param string $script The script to set the message for.
+     * @param string $type The type of message (error, warn, success, info).
+     * @param string $content The content of the message.
+     */
+    public function setMessage(string $script, string $type, string $content): void
+    {
+        $this->messageService->addMessage($script, $type, $content);
+    }
+
+    /**
+     * Gets messages for a specific script.
+     *
+     * @param string $script The script to get messages for.
+     * @return array|null The messages for the script, or null if no messages are set.
+     */
+    public function getMessages(string $script): ?array
+    {
+        return $this->messageService->getMessages($script);
+    }
+
+    /**
+     * Displays messages for a specific template.
+     *
+     * @param string $template The template to display messages for.
+     */
+    public function showMessage(string $template): void
+    {
+        echo $this->messageService->renderMessages($template);
+    }
+
+    /**
+     * Checks a condition and displays an error message if the condition is true.
+     *
+     * @param bool $condition The condition to check.
+     * @param string $errorMessage The error message to display if the condition is true.
+     */
     public function checkCondition(bool $condition, string $errorMessage): void
     {
         if ($condition) {
-            $error = new ErrorMessage($errorMessage);
-            $errorPresenter = new ErrorPresenter();
-            $errorPresenter->present($error);
+            // Add as system message
+            $this->addSystemMessage('error', $errorMessage);
 
+            // Render the page with the message
+            $systemMessages = $this->messageService->getMessages('system');
+            $this->renderHeader($systemMessages);
+            $this->renderFooter();
             exit;
         }
     }
 
+    /**
+     * Create UserPreferenceService instance
+     *
+     * @return UserPreferenceService
+     */
+    protected function createUserPreferenceService(): UserPreferenceService
+    {
+        $db_type = $this->config->get('database', 'type');
+        $repository = new DbUserPreferenceRepository($this->db, $db_type);
+        return new UserPreferenceService($repository, $this->config);
+    }
+
+    protected function createUserTimezoneService(): UserTimezoneService
+    {
+        return new UserTimezoneService($this->createUserPreferenceService(), $this->config);
+    }
+
+    /**
+     * Create PaginationService with user preferences support
+     *
+     * @return PaginationService
+     */
+    protected function createPaginationService(): PaginationService
+    {
+        $userPreferenceService = $this->createUserPreferenceService();
+        return new PaginationService($userPreferenceService);
+    }
+
+    /**
+     * Create DnsBackendProvider for backend-aware DNS operations.
+     *
+     * @return DnsBackendProvider
+     */
+    protected function createDnsBackendProvider(): DnsBackendProvider
+    {
+        return DnsBackendProviderFactory::create($this->db, $this->getConfig(), $this->logger);
+    }
+
+    protected function createDnsDataService(): DnsDataService
+    {
+        $backendProvider = $this->createDnsBackendProvider();
+        return new DnsDataService($backendProvider, $this->db, $this->getConfig());
+    }
+
+    protected function createZoneRepository(): ZoneRepositoryInterface
+    {
+        return $this->getRepositoryFactory()->createZoneRepository();
+    }
+
+    protected function getRepositoryFactory(?DnsBackendProvider $backendProvider = null): RepositoryFactory
+    {
+        $provider = $backendProvider ?? $this->createDnsBackendProvider();
+        return new RepositoryFactory($this->db, $this->getConfig(), $provider, $this->logger);
+    }
+
+    /**
+     * Get current user ID
+     *
+     * @return int|null
+     */
+    protected function getCurrentUserId(): ?int
+    {
+        return $this->userContextService->getLoggedInUserId();
+    }
+
+    /**
+     * Get the user context service
+     *
+     * @return UserContextService
+     */
+    protected function getUserContextService(): UserContextService
+    {
+        return $this->userContextService;
+    }
+
+    /**
+     * Sets the current page identifier used for navigation highlighting.
+     *
+     * @param string $page The page identifier
+     */
+    protected function setCurrentPage(string $page): void
+    {
+        $this->requestData['page'] = $page;
+    }
+
+    /**
+     * Sets the page title displayed in the header.
+     *
+     * @param string $title The page title
+     */
+    protected function setPageTitle(string $title): void
+    {
+        $this->pageTitle = $title;
+    }
+
+    /**
+     * Checks if the user has a specific permission and displays an error message if not.
+     *
+     * @param string $permission The permission to check.
+     * @param string $errorMessage The error message to display if the user does not have the permission.
+     */
     public function checkPermission(string $permission, string $errorMessage): void
     {
-        if (!UserManager::verify_permission($this->db, $permission)) {
-            $error = new ErrorMessage($errorMessage);
-            $errorPresenter = new ErrorPresenter();
-            $errorPresenter->present($error);
+        if (!UserManager::verifyPermission($this->db, $permission)) {
+            $auditService = new AuditService($this->db);
+            $auditService->logAccessDenied($permission, $_SERVER['REQUEST_URI'] ?? '');
 
+            // Check if this request expects JSON
+            if (self::expectsJson()) {
+                header('Content-Type: application/json');
+                http_response_code(403);
+                echo json_encode([
+                    'error' => true,
+                    'message' => $errorMessage
+                ]);
+                exit;
+            }
+
+            // Add as system message
+            $this->addSystemMessage('error', $errorMessage);
+
+            // Render the page with the message
+            $systemMessages = $this->messageService->getMessages('system');
+            $this->renderHeader($systemMessages);
+            $this->renderFooter();
             exit;
         }
     }
 
-    public function showError(string $error): void
+    /**
+     * Displays an error message.
+     *
+     * @param string $error The error message to display.
+     * @param string|null $recordName Optional record name for context
+     */
+    public function showError(string $error, ?string $recordName = null): void
     {
-        $this->renderHeader();
+        // Format the error with record name if provided
+        if ($recordName !== null) {
+            $error = sprintf('%s (Record: %s)', $error, $recordName);
+        }
 
-        $error = new ErrorMessage($error);
-        $errorPresenter = new ErrorPresenter();
-        $errorPresenter->present($error);
+        // Check if this request expects JSON
+        if (self::expectsJson()) {
+            header('Content-Type: application/json');
+            http_response_code(400);
+            echo json_encode([
+                'error' => true,
+                'message' => $error
+            ]);
+            exit;
+        }
 
+        // Add as system message
+        $this->addSystemMessage('error', $error);
+
+        // Render the page with the message
+        $systemMessages = $this->messageService->getMessages('system');
+        $this->renderHeader($systemMessages);
         $this->renderFooter();
         exit;
     }
 
-    public function showFirstError(array $errors): void
-    {
-        $this->renderHeader();
-
-        $validationErrors = array_values($errors);
-        $firstError = reset($validationErrors);
-
-        $error = new ErrorMessage($firstError[0]);
-        $errorPresenter = new ErrorPresenter();
-        $errorPresenter->present($error);
-
-        $this->renderFooter();
-        exit;
-    }
-
-    private function renderHeader(): void
+    /**
+     * Renders the header of the page.
+     *
+     * @param array|null $systemMessages System messages to be displayed
+     */
+    private function renderHeader(?array $systemMessages = null): void
     {
         if (!headers_sent()) {
             header('Content-type: text/html; charset=utf-8');
         }
 
-        $themeManager = new ThemeManager($this->app->config('iface_style'));
-        $ignore_install_dir = $this->app->config('ignore_install_dir');
+        $style = $this->config->get('interface', 'style', 'light');
+        $themeBasePath = $this->config->get('interface', 'theme_base_path', 'templates');
+        $theme = $this->config->get('interface', 'theme', 'default');
+        $styleManager = new StyleManager($style, $themeBasePath, $theme);
+
+        // Check for custom theme stylesheets
+        $customLightExists = file_exists($themeBasePath . '/' . $theme . '/style/custom_light.css');
+        $customDarkExists = file_exists($themeBasePath . '/' . $theme . '/style/custom_dark.css');
+        $customThemeExists = file_exists($themeBasePath . '/' . $theme . '/style/custom_' . $styleManager->getSelectedStyle() . '.css');
 
         $vars = [
-            'iface_title' => $this->app->config('iface_title'),
-            'iface_style' => $themeManager->getSelectedTheme(),
+            'iface_title' => $this->config->get('interface', 'title'),
+            'iface_style' => $styleManager->getSelectedStyle(),
+            'theme' => $theme,
+            'theme_base_path' => $themeBasePath,
+            'base_url_prefix' => $this->config->get('interface', 'base_url_prefix', ''),
             'file_version' => time(),
-            'custom_header' => file_exists('templates/custom/header.html'),
-            'install_error' => !$ignore_install_dir && file_exists('install') ? _('The <a href="install/">install/</a> directory exists, you must remove it first before proceeding.') : false,
+            'custom_header' => file_exists($this->config->get('interface', 'theme_base_path', 'templates') . '/' . $this->config->get('interface', 'theme', 'default') . '/custom/header.html'),
+            'custom_light_exists' => $customLightExists,
+            'custom_dark_exists' => $customDarkExists,
+            'custom_theme_exists' => $customThemeExists,
+            'install_error' => file_exists('install') ? _('The <a href="install/">install/</a> directory exists, you must remove it first before proceeding.') : false,
+            'version' => Version::VERSION,
+            'show_style_switcher' => true,
         ];
 
-        $dblog_use = $this->app->config('dblog_use');
-        $session_key = $this->app->config('session_key');
+        // Language selector for login page
+        $enabledLanguages = $this->config->get('interface', 'enabled_languages', 'en_EN') ?? 'en_EN';
+        $localeList = explode(',', $enabledLanguages);
+        if (count($localeList) > 1) {
+            $interfaceLanguage = $this->config->get('interface', 'language', 'en_EN');
+            // Check for GET lang parameter override
+            if (!empty($_GET['lang']) && in_array($_GET['lang'], $localeList)) {
+                $interfaceLanguage = $_GET['lang'];
+            }
+            $preparedLocales = [];
+            foreach ($localeList as $locale) {
+                $locale = trim($locale);
+                $language = \Poweradmin\Infrastructure\Utility\LanguageCode::getByLocale($locale);
+                $preparedLocales[] = [
+                    'locale' => $locale,
+                    'language' => $language,
+                    'selected' => $locale === $interfaceLanguage,
+                ];
+            }
+            usort($preparedLocales, fn($a, $b) => strcmp($a['language'], $b['language']));
+            $vars['locales'] = $preparedLocales;
+            $vars['show_language_selector'] = true;
+            $vars['current_language'] = $interfaceLanguage;
+        }
 
-        if (isset($_SESSION["userid"])) {
-            $perm_is_godlike = UserManager::verify_permission($this->db,'user_is_ueberuser');
+        $dblog_use = $this->config->get('logging', 'database_enabled');
+        $session_key = $this->config->get('security', 'session_key');
+
+        if ($this->userContextService->isAuthenticated()) {
+            $perm_is_godlike = UserManager::verifyPermission($this->db, 'user_is_ueberuser');
 
             $vars = array_merge($vars, [
-                'user_logged_in' => isset($_SESSION["userid"]),
-                'perm_search' => UserManager::verify_permission($this->db,'search'),
-                'perm_view_zone_own' => UserManager::verify_permission($this->db,'zone_content_view_own'),
-                'perm_view_zone_other' => UserManager::verify_permission($this->db,'zone_content_view_others'),
-                'perm_supermaster_view' => UserManager::verify_permission($this->db,'supermaster_view'),
-                'perm_zone_master_add' => UserManager::verify_permission($this->db,'zone_master_add'),
-                'perm_zone_slave_add' => UserManager::verify_permission($this->db,'zone_slave_add'),
-                'perm_supermaster_add' => UserManager::verify_permission($this->db,'supermaster_add'),
+                'user_logged_in' => $this->userContextService->isAuthenticated(),
+                'user_name' => $this->userContextService->getDisplayName(),
+                'user_username' => $this->userContextService->getLoggedInUsername(),
+                'perm_search' => UserManager::verifyPermission($this->db, 'search'),
+                'perm_view_zone_own' => UserManager::verifyPermission($this->db, 'zone_content_view_own'),
+                'perm_view_zone_other' => UserManager::verifyPermission($this->db, 'zone_content_view_others'),
+                'perm_supermaster_view' => UserManager::verifyPermission($this->db, 'supermaster_view'),
+                'perm_zone_master_add' => UserManager::verifyPermission($this->db, 'zone_master_add'),
+                'perm_zone_slave_add' => UserManager::verifyPermission($this->db, 'zone_slave_add'),
+                'perm_zone_templ_add' => UserManager::verifyPermission($this->db, 'zone_templ_add'),
+                'perm_zone_templ_edit' => UserManager::verifyPermission($this->db, 'zone_templ_edit'),
+                'perm_supermaster_add' => UserManager::verifyPermission($this->db, 'supermaster_add'),
                 'perm_is_godlike' => $perm_is_godlike,
-                'perm_templ_perm_edit' => UserManager::verify_permission($this->db,'templ_perm_edit'),
-                'perm_add_new' => UserManager::verify_permission($this->db,'user_add_new'),
+                'perm_templ_perm_edit' => UserManager::verifyPermission($this->db, 'templ_perm_edit'),
+                'perm_templ_perm_add' => UserManager::verifyPermission($this->db, 'templ_perm_add'),
+                'perm_add_new' => UserManager::verifyPermission($this->db, 'user_add_new'),
+                'perm_view_others' => UserManager::verifyPermission($this->db, 'user_view_others'),
+                'perm_edit_own' => UserManager::verifyPermission($this->db, 'user_edit_own'),
+                'perm_edit_others' => UserManager::verifyPermission($this->db, 'user_edit_others'),
+                'perm_api_manage_keys' => UserManager::verifyPermission($this->db, 'api_manage_keys'),
                 'session_key_error' => $perm_is_godlike && $session_key == 'p0w3r4dm1n' ? _('Default session encryption key is used, please set it in your configuration file.') : false,
-                'auth_used' => $_SESSION["auth_used"] != "ldap",
-                'dblog_use' => $dblog_use
+                'auth_used' => $this->userContextService->getAuthMethod() !== "ldap",  // Legacy variable for backward compatibility
+                'auth_method' => $this->userContextService->getAuthMethod() ?? 'internal',
+                'can_change_password' => !in_array($this->userContextService->getAuthMethod(), ['ldap', 'oidc', 'saml']),
+                'session_userid' => $this->userContextService->getLoggedInUserId() ?? 0,
+                'user_avatar_url' => $this->getUserAvatarUrl(),
+                'request' => $this->requestData,
+                'dblog_use' => $dblog_use,
+                'iface_add_reverse_record' => $this->config->get('interface', 'add_reverse_record', false),
+                'api_enabled' => $this->config->get('api', 'enabled', false),
+                'mfa_enabled' => $this->config->get('security', 'mfa.enabled', false),
+                'enable_consistency_checks' => $this->config->get('interface', 'enable_consistency_checks', false),
+                'api_docs_enabled' => $this->config->get('api', 'docs_enabled', false),
+                'module_nav_items' => $this->getModuleNavItems(),
+                'show_user_access_templates' => $this->config->get('permissions', 'show_user_access_templates', true),
+                'show_group_access_templates' => $this->config->get('permissions', 'show_group_access_templates', true),
             ]);
+
+            // Surface PowerDNS API errors on every page, not just the dashboard.
+            if ($perm_is_godlike && DnsBackendProviderFactory::isApiBackend($this->config)) {
+                $vars['api_error'] = (new ApiStatusService())->getLastError();
+            }
         }
+
+        // Add system messages to header template variables
+        if ($systemMessages) {
+            $vars['system_messages'] = $systemMessages;
+        }
+
+        // Add the current page and page title to the header variables
+        $currentPage = $this->requestData['page'] ?? 'index';
+        $vars['current_page'] = $currentPage;
+        $vars['page_title'] = $this->pageTitle !== '' ? $this->pageTitle : $vars['iface_title'];
 
         $this->app->render('header.html', $vars);
     }
 
+    /**
+     * Renders the footer of the page.
+     */
     private function renderFooter(): void
     {
-        $iface_style = $this->app->config('iface_style');
-        $themeManager = new ThemeManager($iface_style);
-        $selected_theme = $themeManager->getSelectedTheme();
+        $style = $this->config->get('interface', 'style', 'light');
+        $themeBasePath = $this->config->get('interface', 'theme_base_path', 'templates');
+        $theme = $this->config->get('interface', 'theme', 'default');
+        $styleManager = new StyleManager($style, $themeBasePath, $theme);
+        $selected_style = $styleManager->getSelectedStyle();
 
-        $display_stats = $this->app->config('display_stats');
+        $display_stats = $this->config->get('misc', 'display_stats');
+        $db_debug = $this->config->get('database', 'debug');
 
         $this->app->render('footer.html', [
-            'version' => isset($_SESSION["userid"]) ? Version::VERSION : false,
-            'custom_footer' => file_exists('templates/custom/footer.html'),
+            'version' => $this->userContextService->isAuthenticated() ? Version::VERSION : false,
+            'custom_footer' => file_exists($this->config->get('interface', 'theme_base_path', 'templates') . '/' . $this->config->get('interface', 'theme', 'default') . '/custom/footer.html'),
             'display_stats' => $display_stats ? $this->app->displayStats() : false,
-            'db_queries' => $this->app->config('db_debug') ? $this->db->getQueries() : false, // FIXME
-            'show_theme_switcher' => in_array($selected_theme, ['ignite', 'spark']),
-            'iface_style' => $selected_theme,
+            'db_queries' => $db_debug ? $this->init->getDebugQueries() : false,
+            'show_style_switcher' => in_array($selected_style, ['light', 'dark']),
+            'iface_style' => $selected_style,
+            'theme' => $theme,
+            'theme_base_path' => $themeBasePath,
+            'base_url_prefix' => $this->config->get('interface', 'base_url_prefix', ''),
+            'user_logged_in' => $this->userContextService->isAuthenticated(),
         ]);
-
-        $this->db->disconnect();
     }
 
+    /**
+     * Gets navigation items from enabled modules.
+     *
+     * @return array<array<string, string>>
+     */
+    private function getModuleNavItems(): array
+    {
+        $registry = new ModuleRegistry($this->config);
+        $registry->loadModules();
+
+        $isAdmin = UserManager::verifyPermission($this->db, 'user_is_ueberuser');
+        $items = $registry->getNavItems($isAdmin);
+
+        return array_values(array_filter($items, function (array $item): bool {
+            if (!empty($item['permission'])) {
+                return UserManager::verifyPermission($this->db, $item['permission']);
+            }
+            return true;
+        }));
+    }
+
+    /**
+     * Gets the user's avatar URL if avatar functionality is enabled
+     *
+     * @return string|null The avatar URL or null if not available/enabled
+     */
+    private function getUserAvatarUrl(): ?string
+    {
+        $userAvatarService = new UserAvatarService($this->userContextService, $this->config);
+        return $userAvatarService->getCurrentUserAvatarUrl();
+    }
+
+    /**
+     * Gets the request data.
+     *
+     * @return array The request data.
+     */
     public function getRequest(): array
     {
-        return $this->request;
+        return $this->requestData;
     }
 
+    /**
+     * Gets a safe value from the request data.
+     *
+     * @param string $key The key to get the value for.
+     * @return string The safe value.
+     */
     public function getSafeRequestValue(string $key): string
     {
-        if (!array_key_exists($key, $this->request)) {
+        if (!array_key_exists($key, $this->requestData)) {
             return '';
         }
 
-        return htmlspecialchars($this->request[$key], ENT_QUOTES);
+        return htmlspecialchars($this->requestData[$key], ENT_QUOTES);
     }
 
+    /**
+     * Sets validation constraints for the request data.
+     *
+     * @param array $constraints The validation constraints.
+     */
+    public function setValidationConstraints(array $constraints): void
+    {
+        $this->validationConstraints = $constraints;
+    }
+
+    /**
+     * Sets validation rules for the request data.
+     *
+     * @param array $rules The validation rules.
+     */
     public function setRequestRules(array $rules): void
     {
-        $this->validator->rules($rules);
+        $constraints = [];
+
+        // Convert rules to Symfony validator constraints
+        if (isset($rules['required'])) {
+            foreach ($rules['required'] as $field) {
+                $constraints[$field] = new Assert\NotBlank(['message' => sprintf(_('The %s field is required.'), $field)]);
+            }
+        }
+
+        if (isset($rules['integer'])) {
+            foreach ($rules['integer'] as $field) {
+                $constraints[$field] = new Assert\Type([
+                    'type' => 'numeric',
+                    'message' => sprintf(_('The %s field must be a number.'), $field)
+                ]);
+            }
+        }
+
+        $this->validationConstraints = $constraints;
     }
 
-    public function doValidateRequest(): bool
+    /**
+     * Validates data and returns constraint violations.
+     *
+     * @param array|null $data Optional data to validate. If not provided, uses $this->requestData
+     * @return ConstraintViolationListInterface
+     */
+    private function validateData(?array $data = null): ConstraintViolationListInterface
     {
-        return $this->validator->validate();
+        $dataToValidate = $data ?? $this->requestData;
+
+        // Filter input data to remove empty values to prevent type errors
+        foreach ($dataToValidate as $key => $value) {
+            if ($value === '') {
+                unset($dataToValidate[$key]);
+            }
+        }
+
+        $collectionConstraint = new Assert\Collection([
+            'fields' => $this->validationConstraints,
+            'allowExtraFields' => true,
+            'allowMissingFields' => true
+        ]);
+
+        return $this->validator->validate($dataToValidate, $collectionConstraint);
     }
 
-    public function showFirstValidationError(): void {
-        $this->showFirstError($this->validator->errors());
+    /**
+     * Validates the request data.
+     *
+     * @param array|null $data Optional data to validate. If not provided, uses $this->requestData
+     * @return bool True if the request data is valid, false otherwise.
+     */
+    public function doValidateRequest(?array $data = null): bool
+    {
+        $violations = $this->validateData($data);
+        return $violations->count() === 0;
+    }
+
+    /**
+     * Displays the first validation error.
+     *
+     * @param array|null $data Optional data to validate. If not provided, uses $this->requestData
+     */
+    public function showFirstValidationError(?array $data = null): void
+    {
+        $violations = $this->validateData($data);
+
+        if ($violations->count() > 0) {
+            $firstViolation = $violations->get(0);
+            $errorMessage = (string) $firstViolation->getMessage();
+            $this->showError($errorMessage);
+        }
+    }
+
+    /**
+     * Adds a system-wide message that will be displayed on any page
+     *
+     * @param string $type The type of message (error, warn, success, info)
+     * @param string $content The content of the message
+     */
+    public function addSystemMessage(string $type, string $content): void
+    {
+        $this->messageService->addMessage('system', $type, $content);
+    }
+
+    /**
+     * Builds a URL with the given script and arguments.
+     *
+     * @param string $script The script to build the URL for.
+     * @param mixed $args The arguments to include in the URL.
+     * @return string The built URL.
+     */
+    private function buildUrl(string $script, mixed $args): string
+    {
+        $parsedUrl = parse_url($script);
+        $existingQueryParams = $this->parseQueryParams($parsedUrl);
+
+        $args['time'] = time();
+        $queryParams = array_merge($existingQueryParams, $args);
+
+        $queryString = http_build_query($queryParams);
+
+        if (isset($parsedUrl['query'])) {
+            return $script . "&" . $queryString;
+        } else {
+            return $script . "?" . $queryString;
+        }
+    }
+
+    /**
+     * Parses query parameters from a URL.
+     *
+     * @param array $parsedUrl The parsed URL.
+     * @return array The query parameters.
+     */
+    private function parseQueryParams(array $parsedUrl): array
+    {
+        $existingQueryParams = [];
+        if (isset($parsedUrl['query'])) {
+            parse_str($parsedUrl['query'], $existingQueryParams);
+        }
+        return $existingQueryParams;
+    }
+
+    /**
+     * Sends a redirect to the given URL.
+     *
+     * @param string $url The URL to redirect to.
+     */
+    private function sendRedirect(string $url): void
+    {
+        $allowedHosts = [];
+
+        $parsedUrl = parse_url($url);
+        if (isset($parsedUrl['host']) && is_array($allowedHosts) && count($allowedHosts) > 0 && !in_array($parsedUrl['host'], $allowedHosts)) {
+            $url = '/';
+        }
+
+        $sanitizeUrl = filter_var($url, FILTER_SANITIZE_URL);
+        header("Location: $sanitizeUrl");
+        exit;
+    }
+
+    /**
+     * Gets system errors from the MessageService
+     *
+     * @return array System errors
+     */
+    public function getSystemErrors(): array
+    {
+        $messages = $this->messageService->getMessages('system');
+        if ($messages) {
+            $errors = [];
+            foreach ($messages as $message) {
+                if ($message['type'] === 'error') {
+                    $errors[] = $message['content'];
+                }
+            }
+            return $errors;
+        }
+        return [];
     }
 }

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <phpdoc>
-    <title>PowerAdmin</title>
+    <title>Poweradmin</title>
     <parser>
         <target>docs</target>
         <markers>
@@ -30,10 +30,12 @@
     <files>
         <directory>.</directory>
         <ignore>addons/*</ignore>
+        <ignore>config/*</ignore>
         <ignore>install/*</ignore>
         <ignore>logs/*</ignore>
         <ignore>tests/*</ignore>
         <ignore>vendor/*</ignore>
         <ignore>inc/config.inc.php</ignore>
+        <ignore>config/settings.php</ignore>
     </files>
 </phpdoc>

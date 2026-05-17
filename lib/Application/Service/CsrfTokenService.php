@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -22,24 +22,35 @@
 
 namespace Poweradmin\Application\Service;
 
-class CsrfTokenService {
-    const TOKEN_LENGTH = 40;
+class CsrfTokenService
+{
+    public const TOKEN_LENGTH = 40;
 
-    public function generateToken(): string {
+    public function generateToken(): string
+    {
         $bytesNeeded = (int) ceil(4 * self::TOKEN_LENGTH / 3);
         $bytes = random_bytes($bytesNeeded);
         $token = rtrim(strtr(base64_encode($bytes), '+/', '-_'), '=');
         return substr($token, 0, self::TOKEN_LENGTH);
     }
 
-    public function getToken(string $session_var = 'csrf_token'): string {
+    public function getToken(string $session_var = 'csrf_token'): string
+    {
         return $_SESSION[$session_var] ?? '';
     }
 
-    public function validateToken(string $token, string $session_var = 'csrf_token'): bool {
+    public function validateToken(string $token, string $session_var = 'csrf_token'): bool
+    {
         if (!isset($_SESSION[$session_var])) {
             return false;
         }
         return hash_equals($_SESSION[$session_var], $token);
+    }
+
+    public function ensureTokenExists(string $session_var = 'csrf_token'): void
+    {
+        if (!isset($_SESSION[$session_var]) || $_SESSION[$session_var] === '') {
+            $_SESSION[$session_var] = $this->generateToken();
+        }
     }
 }

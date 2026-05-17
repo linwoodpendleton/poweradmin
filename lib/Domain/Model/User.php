@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -22,14 +22,38 @@
 
 namespace Poweradmin\Domain\Model;
 
-class User {
-    private int $id;
-
-    public function __construct(int $id) {
-        $this->id = $id;
+class User
+{
+    public function __construct(
+        private readonly int $id,
+        private readonly string $password,
+        private readonly bool $useLdap
+    ) {
     }
 
-    public function getId(): int {
+    public function getId(): int
+    {
         return $this->id;
+    }
+
+    public function getPassword(): string
+    {
+        return $this->password;
+    }
+
+    /**
+     * Get the hashed password for authentication purposes
+     * This is an alias for getPassword() to match the method name used in authentication
+     *
+     * @return string The hashed password
+     */
+    public function getHashedPassword(): string
+    {
+        return $this->password;
+    }
+
+    public function isLdapUser(): bool
+    {
+        return $this->useLdap;
     }
 }

@@ -7,22 +7,48 @@
   "support": {
     "issues": "https://github.com/poweradmin/poweradmin/issues",
     "forum": "https://github.com/poweradmin/poweradmin/discussions",
-    "wiki": "https://github.com/poweradmin/poweradmin/wiki",
     "source": "https://github.com/poweradmin/poweradmin",
-    "chat": "https://gitter.im/poweradmin/poweradmin"
+    "docs": "https://docs.poweradmin.org"
   },
+  "funding": [
+    {
+      "type": "opencollective",
+      "url": "https://opencollective.com/poweradmin"
+    },
+    {
+      "type": "other",
+      "url": "https://paypal.me/egirkantas"
+    }
+  ],
   "require": {
-    "php": ">=8.1",
+    "php": ">=8.2",
     "ext-intl": "*",
     "ext-gettext": "*",
     "ext-openssl": "*",
     "ext-pdo": "*",
-    "twig/twig": "^v3.10.3",
-    "vlucas/valitron": "^v1.4.11",
-    "symfony/twig-bridge": "^v6.4.0",
-    "symfony/translation": "^v6.4.0",
-    "twbs/bootstrap": "^v5.3.3",
-    "twbs/bootstrap-icons": "^v1.11.3"
+    "jeremykendall/php-domain-parser": "^6.4.0",
+    "psr/log": "^3.0.2",
+    "symfony/config": "^7.4.4",
+    "symfony/console": "^7.4.4",
+    "symfony/filesystem": "^7.4.0",
+    "symfony/http-foundation": "^7.4.5",
+    "symfony/property-access": "^7.4.4",
+    "symfony/routing": "^7.4.4",
+    "symfony/serializer": "^7.4.5",
+    "symfony/string": "^7.4.4",
+    "symfony/translation": "^7.4.4",
+    "symfony/twig-bridge": "^7.4.5",
+    "symfony/validator": "^7.4.5",
+    "twbs/bootstrap": "^5.3.7",
+    "twbs/bootstrap-icons": "^1.13.1",
+    "twig/twig": "^3.21.1",
+    "pragmarx/google2fa": "^9.0.0",
+    "bacon/bacon-qr-code": "^3.0.1",
+    "zircote/swagger-php": "^6.0.5",
+    "league/oauth2-client": "^2.8",
+    "onelogin/php-saml": "^4.2",
+    "symfony/security-bundle": "^7.4.4",
+    "symfony/mailer": "^7.4.4"
   },
   "suggest": {
     "ext-ldap": "For LDAP support"
@@ -33,11 +59,109 @@
       "PoweradminInstall\\": "install/helpers"
     }
   },
+  "autoload-dev": {
+    "psr-4": {
+      "Poweradmin\\Tests\\Unit\\": "tests/unit/",
+      "Poweradmin\\Tests\\Integration\\": "tests/integration/",
+      "TestHelpers\\": "tests/helpers"
+    }
+  },
   "require-dev": {
-    "phpunit/phpunit": "^10.4.2"
+    "phpunit/phpunit": "^11.5",
+    "squizlabs/php_codesniffer": "^4.0.1",
+    "phpstan/phpstan": "^2.1",
+    "friendsofphp/php-cs-fixer": "^v3.89",
+    "vimeo/psalm": "^6.15",
+    "phpmd/phpmd": "^2.15"
   },
   "scripts": {
-    "docs": "tools/phpDocumentor",
-    "tests": "phpunit"
+    "phpdoc:install": "test -f .phpdoc/phpDocumentor.phar || (mkdir -p .phpdoc && curl -sL -o .phpdoc/phpDocumentor.phar https://phpdoc.org/phpDocumentor.phar)",
+    "docs": ["@phpdoc:install", "php .phpdoc/phpDocumentor.phar"],
+    "docs:api:json": "vendor/bin/openapi lib/Application/Controller/Api/V1/ --output docs/openapi.json",
+    "docs:api:yaml": "vendor/bin/openapi lib/Application/Controller/Api/V1/ --output docs/openapi.yaml --format yaml",
+    "docs:api": ["@docs:api:json", "@docs:api:yaml"],
+
+    "tests": "phpunit --testsuite unit",
+    "tests:integration": "phpunit --testsuite integration",
+    "tests:functional": "phpunit --testsuite functional",
+    "tests:all": "phpunit",
+
+    "check:all": "phpcs --standard=phpcs.xml addons config index.php install lib tests dynamic_update.php",
+    "format:all": "phpcbf --standard=phpcs.xml addons config index.php install lib tests dynamic_update.php",
+    "style:all": "PHP_CS_FIXER_IGNORE_ENV=1 php-cs-fixer fix -- addons config index.php install lib tests dynamic_update.php",
+    "analyse:phpstan": "phpstan analyse --level=3 --memory-limit=512M addons config index.php install lib tests dynamic_update.php",
+    "analyse:psalm": "psalm",
+    "quality:all": "phpmd addons,config,index.php,install,lib,dynamic_update.php ansi phpmd.xml",
+    "lint:twig": "! grep -rn 'name=\"csrf_token\"' templates/ --include='*.html' || (echo 'ERROR: Use name=\"_token\" instead of name=\"csrf_token\" for CSRF token fields' && false)",
+    "analyse:all": [
+        "@check:all",
+        "@analyse:psalm",
+        "@analyse:phpstan",
+        "@lint:twig"
+    ],
+
+    "locale:check": "failed=0; for f in locale/*/LC_MESSAGES/messages.po; do if msgfmt --check -o /dev/null \"$f\" 2>&1 | grep -q 'fatal error'; then echo \"FAIL: $f\"; failed=1; fi; done; exit $failed",
+    "locale:stats": "./scripts/check_translation_stats.sh",
+    "locale:all": [
+        "@locale:check",
+        "@locale:stats"
+    ],
+
+    "phan:install": "test -f .phan/phan.phar || curl -sL -o .phan/phan.phar https://github.com/phan/phan/releases/download/6.0.1/phan.phar",
+    "compat:8.2": ["@phan:install", "php .phan/phan.phar --target-php-version=8.2 --allow-polyfill-parser"],
+    "compat:8.3": ["@phan:install", "php .phan/phan.phar --target-php-version=8.3 --allow-polyfill-parser"],
+    "compat:8.4": ["@phan:install", "php .phan/phan.phar --target-php-version=8.4 --allow-polyfill-parser"],
+    "compat:8.5": ["@phan:install", "php .phan/phan.phar --target-php-version=8.5 --allow-polyfill-parser"],
+    "compat:all": [
+        "@compat:8.2",
+        "@compat:8.3",
+        "@compat:8.4",
+        "@compat:8.5"
+    ],
+
+    "post-create-project-cmd": [
+      "rm -rf install/",
+      "rm -rf tests/"
+    ]
+  },
+  "config": {
+    "platform": {
+      "php": "8.2.27"
+    },
+    "allow-plugins": {
+      "cweagans/composer-patches": true
+    },
+    "audit": {
+      "ignore": {
+        "GHSA-qrr6-mg7r-m243": "phpunit is a dev-only dependency; 11.x line did not receive a back-port. Upgrading requires dropping PHP 8.2 support."
+      }
+    }
+  },
+  "archive": {
+    "exclude": [
+      ".devcontainer",
+      ".github",
+      ".phan",
+      ".phpdoc",
+      "playwright/",
+      "install/",
+      "tests",
+      ".dockerignore",
+      ".gitignore",
+      ".hadolint.yaml",
+      ".php-cs-fixer.cache",
+      ".php-cs-fixer.php",
+      "playwright.config.js",
+      "DONORS.md",
+      "package.json",
+      "phpcs.xml",
+      "phpdoc.dist.xml",
+      "phpmd.xml",
+      "phpstan.neon",
+      "phpunit.xml.dist",
+      "psalm-baseline.xml",
+      "psalm.xml",
+      "transifex.yml"
+    ]
   }
 }

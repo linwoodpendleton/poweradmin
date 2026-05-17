@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2026 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -25,29 +25,42 @@
  *
  * @package     Poweradmin
  * @copyright   2007-2010 Rejo Zenger <rejo@zenger.nl>
- * @copyright   2010-2024 Poweradmin Development Team
+ * @copyright   2010-2025 Poweradmin Development Team
  * @license     https://opensource.org/licenses/GPL-3.0 GPL
  */
 
 namespace Poweradmin\Application\Controller;
 
 use Poweradmin\BaseController;
+use Poweradmin\Domain\Service\UserContextService;
+use Poweradmin\Infrastructure\Logger\LegacyLogger;
 use Poweradmin\Infrastructure\Repository\DbPermissionTemplateRepository;
+use Poweradmin\Infrastructure\Utility\IpAddressRetriever;
 
 class AddPermTemplController extends BaseController
 {
     private DbPermissionTemplateRepository $permissionTemplate;
+    private LegacyLogger $auditLogger;
+    private UserContextService $userContextService;
+    private IpAddressRetriever $ipAddressRetriever;
 
     public function __construct(array $request)
     {
         parent::__construct($request);
 
-        $this->permissionTemplate = new DbPermissionTemplateRepository($this->db);
+        $this->permissionTemplate = new DbPermissionTemplateRepository($this->db, $this->getConfig());
+        $this->auditLogger = new LegacyLogger($this->db);
+        $this->userContextService = new UserContextService();
+        $this->ipAddressRetriever = new IpAddressRetriever($_SERVER);
     }
 
     public function run(): void
     {
         $this->checkPermission('templ_perm_add', _("You do not have the permission to add permission templates."));
+
+        // Set the current page for navigation highlighting
+        $this->setCurrentPage('add_perm_templ');
+        $this->setPageTitle(_('Add Permission Template'));
 
         if ($this->isPost()) {
             $this->handleFormSubmission();
@@ -66,26 +79,39 @@ class AddPermTemplController extends BaseController
         }
 
         $this->permissionTemplate->addPermissionTemplate($this->getRequest());
+
+        $this->auditLogger->logInfo(sprintf(
+            'client_ip:%s user:%s operation:add_perm_template name:%s',
+            $this->ipAddressRetriever->getClientIp(),
+            $this->userContextService->getLoggedInUsername(),
+            $this->getSafeRequestValue('templ_name')
+        ));
+
         $this->setMessage('list_perm_templ', 'success', _('The permission template has been added successfully.'));
-        $this->redirect('index.php', ['page' => 'list_perm_templ']);
+        $this->redirect('/permissions/templates');
     }
 
     private function showForm(): void
     {
         $this->render('add_perm_templ.html', [
-            'perms_avail' => $this->permissionTemplate->getPermissionsByTemplateId()
+            'perms_avail' => $this->permissionTemplate->getPermissionsByTemplateId(),
+            'show_user_access_templates' => $this->config->get('permissions', 'show_user_access_templates', true),
+            'show_group_access_templates' => $this->config->get('permissions', 'show_group_access_templates', true),
         ]);
     }
 
     private function validateSubmitRequest(): bool
     {
         $this->setRequestRules([
-            'required' => ['templ_name'],
+            'required' => ['templ_name', 'template_type'],
             'lengthMax' => [
                 ['templ_name', 128],
                 ['templ_descr', 1024],
             ],
             'array' => ['perm_id'],
+            'in' => [
+                ['template_type', ['user', 'group']]
+            ],
         ]);
 
         return $this->doValidateRequest();

@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2026 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -22,25 +22,30 @@
 
 namespace Poweradmin\Infrastructure\Logger;
 
-use Poweradmin\Infrastructure\Database\PDOLayer;
-use Poweradmin\AppConfiguration;
+use Poweradmin\Infrastructure\Configuration\ConfigurationManager;
+use Poweradmin\Domain\Service\DnsBackendProvider;
+use PDO;
 
 class LegacyLogger
 {
-    private PDOLayer $db;
-    private AppConfiguration $config;
+    private PDO $db;
+    private ConfigurationManager $config;
+    private ?DnsBackendProvider $backendProvider;
 
-    public function __construct($db) {
+    public function __construct($db, ?DnsBackendProvider $backendProvider = null)
+    {
         $this->db = $db;
-        $this->config = new AppConfiguration();
+        $this->config = ConfigurationManager::getInstance();
+        $this->config->initialize();
+        $this->backendProvider = $backendProvider;
     }
 
-    private function do_log($message, $priority, $zone_id = NULL): void
+    private function doLog(string $message, int $priority, ?int $zone_id = null): void
     {
-        $syslog_use = $this->config->get('syslog_use');
-        $syslog_ident = $this->config->get('syslog_ident');
-        $syslog_facility = $this->config->get('syslog_facility');
-        $dblog_use = $this->config->get('dblog_use');
+        $syslog_use = $this->config->get('logging', 'syslog_enabled');
+        $syslog_ident = $this->config->get('logging', 'syslog_identity');
+        $syslog_facility = $this->config->get('logging', 'syslog_facility');
+        $dblog_use = $this->config->get('logging', 'database_enabled');
 
         if ($syslog_use) {
             openlog($syslog_ident, LOG_PERROR, $syslog_facility);
@@ -49,34 +54,88 @@ class LegacyLogger
         }
 
         if ($dblog_use) {
-            // TODO: This distinction would be better handled with special type enum
-            if ($zone_id) {
-                $dbZoneLogger = new DbZoneLogger($this->db);
-                $dbZoneLogger->do_log($message, $zone_id, $priority);
+            $logType = $zone_id !== null ? LogType::ZONE : LogType::USER;
+
+            if ($logType === LogType::ZONE) {
+                $dbZoneLogger = new DbZoneLogger($this->db, $this->backendProvider);
+                $dbZoneLogger->doLog($message, $zone_id, $priority);
             } else {
                 $dbUserLogger = new DbUserLogger($this->db);
-                $dbUserLogger->do_log($message, $priority);
+                $dbUserLogger->doLog($message, $priority);
             }
         }
     }
 
-    public function log_error($message, $zone_id = NULL): void
+    public function logError(string $message, ?int $zone_id = null): void
     {
-        $this->do_log($message, LOG_ERR, $zone_id);
+        $this->doLog($message, LOG_ERR, $zone_id);
     }
 
-    public function log_warn($message, $zone_id = NULL): void
+    public function logWarn(string $message, ?int $zone_id = null): void
     {
-        $this->do_log($message, LOG_WARNING, $zone_id);
+        $this->doLog($message, LOG_WARNING, $zone_id);
     }
 
-    public function log_notice($message): void
+    public function logNotice(string $message): void
     {
-        $this->do_log($message, LOG_NOTICE);
+        $this->doLog($message, LOG_NOTICE);
     }
 
-    public function log_info($message, $zone_id = NULL): void
+    public function logInfo(string $message, ?int $zone_id = null): void
     {
-        $this->do_log($message, LOG_INFO, $zone_id);
+        $this->doLog($message, LOG_INFO, $zone_id);
+    }
+
+    public function logGroupInfo(string $message, ?int $group_id): void
+    {
+        $this->doLogWithGroup($message, LOG_INFO, $group_id);
+    }
+
+    public function logGroupWarning(string $message, ?int $group_id): void
+    {
+        $this->doLogWithGroup($message, LOG_WARNING, $group_id);
+    }
+
+    public function logApiInfo(string $message): void
+    {
+        $this->doLogWithApi($message, LOG_INFO);
+    }
+
+    private function doLogWithApi(string $message, int $priority): void
+    {
+        $syslog_use = $this->config->get('logging', 'syslog_enabled');
+        $syslog_ident = $this->config->get('logging', 'syslog_identity');
+        $syslog_facility = $this->config->get('logging', 'syslog_facility');
+        $dblog_use = $this->config->get('logging', 'database_enabled');
+
+        if ($syslog_use) {
+            openlog($syslog_ident, LOG_PERROR, $syslog_facility);
+            syslog($priority, $message);
+            closelog();
+        }
+
+        if ($dblog_use) {
+            $dbApiLogger = new DbApiLogger($this->db);
+            $dbApiLogger->doLog($message, $priority);
+        }
+    }
+
+    private function doLogWithGroup(string $message, int $priority, ?int $group_id): void
+    {
+        $syslog_use = $this->config->get('logging', 'syslog_enabled');
+        $syslog_ident = $this->config->get('logging', 'syslog_identity');
+        $syslog_facility = $this->config->get('logging', 'syslog_facility');
+        $dblog_use = $this->config->get('logging', 'database_enabled');
+
+        if ($syslog_use) {
+            openlog($syslog_ident, LOG_PERROR, $syslog_facility);
+            syslog($priority, $message);
+            closelog();
+        }
+
+        if ($dblog_use) {
+            $dbGroupLogger = new DbGroupLogger($this->db);
+            $dbGroupLogger->doLog($message, $group_id, $priority);
+        }
     }
 }

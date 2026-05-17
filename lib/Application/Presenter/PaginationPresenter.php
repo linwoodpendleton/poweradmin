@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -29,11 +29,11 @@ class PaginationPresenter
     private Pagination $pagination;
 
     private string $urlPattern;
-    private ?string $id;
+    private string $id;
 
     private int $numDisplayPages = 8;
 
-    public function __construct(Pagination $pagination, string $urlPattern, ?string $id = null)
+    public function __construct(Pagination $pagination, string $urlPattern, string $id = '')
     {
         $this->pagination = $pagination;
         $this->urlPattern = $urlPattern;
@@ -46,7 +46,7 @@ class PaginationPresenter
             return '';
         }
 
-        $html = '<nav><ul class="pagination">';
+        $html = '<nav><ul class="pagination pagination-sm d-flex flex-wrap">';
 
         if ($this->pagination->hasPreviousPage()) {
             $html .= $this->pageItem($this->pagination->getPreviousPage(), _('Previous'), false);
@@ -94,10 +94,19 @@ class PaginationPresenter
 
     private function createPageUrl(int $pageNumber): string
     {
-        $url = str_replace('{PageNumber}', $pageNumber, $this->urlPattern);
-        if ($this->id !== null) {
+        $url = str_replace('{PageNumber}', (string)$pageNumber, $this->urlPattern);
+
+        // Add ID parameter if present
+        if ($this->id !== '') {
             $url .= (parse_url($url, PHP_URL_QUERY) ? '&' : '?') . 'id=' . urlencode($this->id);
         }
+
+        // Add rows_per_page parameter if present in the current request
+        if (isset($_GET['rows_per_page'])) {
+            $rowsPerPage = (int) $_GET['rows_per_page'];
+            $url .= (parse_url($url, PHP_URL_QUERY) ? '&' : '?') . 'rows_per_page=' . $rowsPerPage;
+        }
+
         return $url;
     }
 

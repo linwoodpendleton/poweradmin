@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2026 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -25,7 +25,7 @@
  *
  * @package     Poweradmin
  * @copyright   2007-2010 Rejo Zenger <rejo@zenger.nl>
- * @copyright   2010-2024 Poweradmin Development Team
+ * @copyright   2010-2025 Poweradmin Development Team
  * @license     https://opensource.org/licenses/GPL-3.0 GPL
  */
 
@@ -33,17 +33,26 @@ namespace Poweradmin\Application\Controller;
 
 use Poweradmin\BaseController;
 use Poweradmin\Domain\Model\UserManager;
+use Poweradmin\Domain\Service\UserContextService;
+use Poweradmin\Infrastructure\Logger\LegacyLogger;
 use Poweradmin\Infrastructure\Repository\DbPermissionTemplateRepository;
+use Poweradmin\Infrastructure\Utility\IpAddressRetriever;
 
 class DeletePermTemplController extends BaseController
 {
     private DbPermissionTemplateRepository $permissionTemplate;
+    private LegacyLogger $auditLogger;
+    private UserContextService $userContextService;
+    private IpAddressRetriever $ipAddressRetriever;
 
     public function __construct(array $request)
     {
         parent::__construct($request);
 
-        $this->permissionTemplate = new DbPermissionTemplateRepository($this->db);
+        $this->permissionTemplate = new DbPermissionTemplateRepository($this->db, $this->getConfig());
+        $this->auditLogger = new LegacyLogger($this->db);
+        $this->userContextService = new UserContextService();
+        $this->ipAddressRetriever = new IpAddressRetriever($_SERVER);
     }
 
     public function run(): void
@@ -64,21 +73,30 @@ class DeletePermTemplController extends BaseController
             return;
         }
 
-        $id = $this->getSafeRequestValue('id');
-        if (UserManager::delete_perm_templ($this->db, $id)) {
+        $id = (int)$this->getSafeRequestValue('id');
+        $templDetails = $this->permissionTemplate->getPermissionTemplateDetails($id);
+
+        if (UserManager::deletePermTempl($this->db, $id)) {
+            $this->auditLogger->logInfo(sprintf(
+                'client_ip:%s user:%s operation:delete_perm_template id:%s name:%s',
+                $this->ipAddressRetriever->getClientIp(),
+                $this->userContextService->getLoggedInUsername(),
+                $id,
+                $templDetails['name'] ?? 'unknown'
+            ));
+
             $this->setMessage('list_perm_templ', 'success', _('The permission template has been deleted successfully.'));
-            $this->redirect('index.php', ['page'=> 'list_perm_templ']);
+        } else {
+            $this->setMessage('list_perm_templ', 'error', _('The permission template could not be deleted.'));
         }
 
-        $this->render('list_perm_templ.html', [
-            'permission_templates' => $this->permissionTemplate->listPermissionTemplates(),
-        ]);
+        $this->redirect('/permissions/templates');
     }
 
     private function showForm(): void
     {
         $id = $this->getSafeRequestValue('id');
-        $templ_details = $this->permissionTemplate->getPermissionTemplateDetails($id);
+        $templ_details = $this->permissionTemplate->getPermissionTemplateDetails((int)$id);
 
         $this->render('delete_perm_templ.html', [
             'perm_templ_id' => $id,

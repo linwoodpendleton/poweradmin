@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -25,7 +25,7 @@
  *
  * @package     Poweradmin
  * @copyright   2007-2010 Rejo Zenger <rejo@zenger.nl>
- * @copyright   2010-2024 Poweradmin Development Team
+ * @copyright   2010-2025 Poweradmin Development Team
  * @license     https://opensource.org/licenses/GPL-3.0 GPL
  */
 
@@ -57,9 +57,9 @@ class AddSupermasterController extends BaseController
     private function addSuperMaster($master_ip, $ns_name, $account): void
     {
         $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-        if ($dnsRecord->add_supermaster($master_ip, $ns_name, $account)) {
+        if ($dnsRecord->addSupermaster($master_ip, $ns_name, $account)) {
             $this->setMessage('list_supermasters', 'success', _('The supermaster has been added successfully.'));
-            $this->redirect('index.php', ['page'=> 'list_supermasters']);
+            $this->redirect('/supermasters');
         } else {
             $this->showAddSuperMaster($master_ip, $ns_name, $account);
         }
@@ -68,11 +68,11 @@ class AddSupermasterController extends BaseController
     private function showAddSuperMaster($master_ip, $ns_name, $account): void
     {
         $this->render('add_supermaster.html', [
-            'users' => UserManager::show_users($this->db),
+            'users' => UserManager::showUsers($this->db),
             'master_ip' => htmlspecialchars($master_ip),
             'ns_name' => htmlspecialchars($ns_name),
             'account' => htmlspecialchars($account),
-            'perm_view_others' => UserManager::verify_permission($this->db, 'user_view_others'),
+            'perm_view_others' => UserManager::verifyPermission($this->db, 'user_view_others'),
             'session_uid' => $_SESSION['userid']
         ]);
     }

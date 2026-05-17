@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -22,18 +22,22 @@
 
 namespace Poweradmin\Domain\Service;
 
-use Poweradmin\AppConfiguration;
-use Poweradmin\Infrastructure\Database\PDOLayer;
+use Poweradmin\Domain\Service\DnsValidation\DnsValidatorRegistry;
+use Poweradmin\Domain\Service\DnsValidation\HostnameValidator;
+use Poweradmin\Infrastructure\Configuration\ConfigurationManager;
+use PDO;
 
 class Validator
 {
-    private PDOLayer $db;
-    private AppConfiguration $config;
+    private PDO $db;
+    private ConfigurationManager $config;
+    private DnsValidatorRegistry $validatorRegistry;
 
-    public function __construct(PDOLayer $db, AppConfiguration $config)
+    public function __construct(PDO $db, ConfigurationManager $config)
     {
         $this->db = $db;
         $this->config = $config;
+        $this->validatorRegistry = new DnsValidatorRegistry($config, $db);
     }
 
     /** Validate email address string
@@ -42,12 +46,14 @@ class Validator
      *
      * @return boolean true if valid, false otherwise
      */
-    public function is_valid_email(string $address): bool
+    public function isValidEmail(string $address): bool
     {
-        $dns = new Dns($this->db, $this->config);
-
         $fields = explode("@", $address, 2);
-        if ((!preg_match("/^[0-9a-z]([-_.]?[0-9a-z])*$/i", $fields[0])) || (!isset($fields[1]) || $fields[1] == '' || !$dns->is_valid_hostname_fqdn($fields[1], 0))) {
+        $hostnameValidator = new HostnameValidator($this->config);
+        if (
+            (!preg_match("/^[0-9a-z]([-_.]?[0-9a-z])*$/i", $fields[0])) ||
+            (!isset($fields[1]) || $fields[1] == '' || !$hostnameValidator->isValid($fields[1]))
+        ) {
             return false;
         }
         return true;
@@ -59,7 +65,7 @@ class Validator
      *
      * @return boolean true if number, false otherwise
      */
-    public static function is_number(string $string): bool
+    public static function isNumber(string $string): bool
     {
         if (!preg_match("/^[0-9]+$/i", $string)) {
             return false;

@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -22,20 +22,36 @@
 
 namespace Poweradmin;
 
-use Poweradmin\Application\Presenter\ErrorPresenter;
 use Poweradmin\Application\Service\DatabaseService;
-use Poweradmin\Domain\Error\ErrorMessage;
+use Poweradmin\Domain\Service\DatabaseCredentialMapper;
+use Poweradmin\Domain\Service\UserContextService;
+use Poweradmin\Infrastructure\Configuration\ConfigurationManager;
+use PDO;
+use Poweradmin\Infrastructure\Database\DebugPDO;
 use Poweradmin\Infrastructure\Database\PDODatabaseConnection;
-use Poweradmin\Infrastructure\Database\PDOLayer;
+use Poweradmin\Infrastructure\Service\MessageService;
 use Poweradmin\Infrastructure\Service\SessionAuthenticator;
 use Poweradmin\Infrastructure\Utility\DependencyCheck;
 
+/**
+ * Class AppInitializer
+ *
+ * Initializes the application by checking dependencies, loading configuration,
+ * setting locale, connecting to the database, and optionally authenticating the user.
+ */
 class AppInitializer
 {
-    private AppConfiguration $config;
-    private LocaleManager $locale;
-    private PDOLayer $db;
+    /** @var ConfigurationManager $configManager Configuration manager */
+    private ConfigurationManager $configManager;
 
+    /** @var PDO $db Database connection layer */
+    private PDO $db;
+
+    /**
+     * AppInitializer constructor.
+     *
+     * @param bool $authenticate Whether to authenticate the user
+     */
     public function __construct(bool $authenticate)
     {
         $this->checkDependencies();
@@ -48,62 +64,110 @@ class AppInitializer
         }
     }
 
+    /**
+     * Checks if the configuration file exists.
+     * If not, presents an error message and exits the application.
+     */
     private function checkConfigurationFile(): void
     {
-        if (!file_exists('inc/config.inc.php')) {
-            $error = new ErrorMessage(_('The configuration file (config.inc.php) does not exist. Please use the <a href="install/">installer</a> to create it.'));
-            $errorPresenter = new ErrorPresenter();
-            $errorPresenter->present($error);
-            exit();
+        $customConfigPath = getenv('PA_CONFIG_PATH');
+        $configFile = $customConfigPath !== false && $customConfigPath !== ''
+            ? $customConfigPath
+            : 'config/settings.php';
+
+        if (!file_exists($configFile)) {
+            $messageService = new MessageService();
+            $messageService->displayHtmlError(
+                sprintf(
+                    _('No configuration file found at %s. Please use the <a href="install/">installer</a> to create one, or create the configuration file manually.'),
+                    htmlspecialchars($configFile)
+                )
+            );
         }
     }
 
+    /**
+     * Checks if all required dependencies are installed.
+     */
     private function checkDependencies(): void
     {
         DependencyCheck::verifyExtensions();
     }
 
+    /**
+     * Loads the application configuration.
+     */
     private function loadConfiguration(): void
     {
-        $this->config = new AppConfiguration();
+        $this->configManager = ConfigurationManager::getInstance();
+        $this->configManager->initialize();
     }
 
+    /**
+     * Loads and sets the locale based on the configuration or user session.
+     */
     private function loadLocale(): void
     {
-        $supportedLocales = explode(',', $this->config->get('iface_enabled_languages'));
-        $this->locale = new LocaleManager($supportedLocales, './locale');
+        $enabledLanguages = $this->configManager->get('interface', 'enabled_languages');
+        if (!$enabledLanguages) {
+            // Fallback to legacy config key
+            $enabledLanguages = $this->configManager->get('interface', 'enabled_languages', 'en_EN');
+        }
 
-        $userLang = $_SESSION["userlang"] ?? $this->config->get('iface_lang');
-        $this->locale->setLocale($userLang);
+        $supportedLocales = explode(',', $enabledLanguages);
+        $locale = new LocaleManager($supportedLocales, './locale');
+
+        $userContextService = new UserContextService();
+        $defaultLanguage = $this->configManager->get('interface', 'language', 'en_EN');
+        $userLang = $userContextService->getUserLanguage() ?? $defaultLanguage;
+
+        // Allow language override via GET parameter (login page language switcher)
+        if (!empty($_GET['lang']) && in_array($_GET['lang'], $supportedLocales)) {
+            $userLang = $_GET['lang'];
+        }
+
+        $locale->setLocale($userLang);
     }
 
+    /**
+     * Connects to the database using the configuration settings.
+     */
     private function connectToDatabase(): void
     {
-        $credentials = [
-            'db_host' => $this->config->get('db_host'),
-            'db_port' => $this->config->get('db_port'),
-            'db_user' => $this->config->get('db_user'),
-            'db_pass' => $this->config->get('db_pass'),
-            'db_name' => $this->config->get('db_name'),
-            'db_charset' => $this->config->get('db_charset'),
-            'db_collation' => $this->config->get('db_collation'),
-            'db_type' => $this->config->get('db_type'),
-            'db_file' => $this->config->get('db_file'),
-        ];
+        $credentials = DatabaseCredentialMapper::mapCredentials($this->configManager);
 
         $databaseConnection = new PDODatabaseConnection();
         $databaseService = new DatabaseService($databaseConnection);
         $this->db = $databaseService->connect($credentials);
     }
 
+    /**
+     * Authenticates the user using session data.
+     */
     private function authenticateUser(): void
     {
-        $legacyAuthenticateSession = new SessionAuthenticator($this->db, $this->config);
-        $legacyAuthenticateSession->authenticate();
+        $sessionAuthenticator = new SessionAuthenticator($this->db, $this->configManager);
+        $sessionAuthenticator->authenticate();
     }
 
-    public function getDb(): PDOLayer
+    /**
+     * Gets the database connection.
+     *
+     * @return PDO The database connection
+     */
+    public function getDb(): PDO
     {
         return $this->db;
+    }
+
+    /**
+     * @return array<string>
+     */
+    public function getDebugQueries(): array
+    {
+        if ($this->db instanceof DebugPDO) {
+            return $this->db->getQueries();
+        }
+        return [];
     }
 }

@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -25,43 +25,68 @@
  *
  * @package     Poweradmin
  * @copyright   2007-2010 Rejo Zenger <rejo@zenger.nl>
- * @copyright   2010-2024 Poweradmin Development Team
+ * @copyright   2010-2025 Poweradmin Development Team
  * @license     https://opensource.org/licenses/GPL-3.0 GPL
  */
 
 namespace Poweradmin\Application\Controller;
 
 use Poweradmin\Application\Presenter\PaginationPresenter;
+use Poweradmin\Application\Service\AuditService;
 use Poweradmin\Application\Service\PaginationService;
 use Poweradmin\BaseController;
 use Poweradmin\Domain\Model\UserManager;
 use Poweradmin\Domain\Model\ZoneTemplate;
 use Poweradmin\Domain\Service\DnsRecord;
+use Poweradmin\Domain\Service\UserContextService;
+use Poweradmin\Domain\Service\ZoneTemplateSyncService;
 use Poweradmin\Infrastructure\Service\HttpPaginationParameters;
-use Valitron;
+use Symfony\Component\Validator\Constraints as Assert;
 
 class EditZoneTemplController extends BaseController
 {
+    private UserContextService $userContext;
+
+    public function __construct(array $request)
+    {
+        parent::__construct($request);
+        $this->userContext = new UserContextService();
+    }
 
     public function run(): void
     {
-        $zone_templ_id = htmlspecialchars($_GET['id']);
-        $owner = ZoneTemplate::get_zone_templ_is_owner($this->db, $zone_templ_id, $_SESSION['userid']);
-        $perm_godlike = UserManager::verify_permission($this->db, 'user_is_ueberuser');
-        $perm_master_add = UserManager::verify_permission($this->db, 'zone_master_add');
-
-        $this->checkCondition(!($perm_godlike || $perm_master_add && $owner), _("You do not have the permission to delete zone templates."));
-
-        $v = new Valitron\Validator($_GET);
-        $v->rules([
-            'required' => ['id'],
-            'integer' => ['id'],
-        ]);
-        if (!$v->validate()) {
-            $this->showFirstError($v->errors());
+        $id = $this->getSafeRequestValue('id');
+        if (empty($id)) {
+            $this->showError(_('No template ID provided.'));
+            return;
         }
 
-        if (ZoneTemplate::zone_templ_id_exists($this->db, $zone_templ_id) == "0") {
+        $zone_templ_id = (int)$id;
+        $userId = $this->userContext->getLoggedInUserId();
+        $owner = ZoneTemplate::getZoneTemplIsOwner($this->db, $zone_templ_id, $userId);
+        $perm_godlike = UserManager::verifyPermission($this->db, 'user_is_ueberuser');
+        $perm_templ_edit = UserManager::verifyPermission($this->db, 'zone_templ_edit');
+
+        $this->checkCondition(!($perm_godlike || $perm_templ_edit && $owner), _("You do not have the permission to edit zone templates."));
+
+        // Set the current page for navigation highlighting
+        $this->setCurrentPage('edit_zone_templ');
+        $this->setPageTitle(_('Edit Zone Template'));
+
+        $constraints = [
+            'id' => [
+                new Assert\NotBlank(),
+                new Assert\Type('numeric')
+            ]
+        ];
+
+        $this->setValidationConstraints($constraints);
+
+        if (!$this->doValidateRequest($this->requestData)) {
+            $this->showFirstValidationError($this->requestData);
+        }
+
+        if (ZoneTemplate::zoneTemplIdExists($this->db, $zone_templ_id) == "0") {
             $this->showError(_('There is no zone template with this ID.'));
         }
 
@@ -72,47 +97,54 @@ class EditZoneTemplController extends BaseController
         $this->showForm($zone_templ_id);
     }
 
-    private function updateZoneTemplate(string $zone_templ_id): void
+    private function updateZoneTemplate(int $zone_templ_id): void
     {
-        $owner = ZoneTemplate::get_zone_templ_is_owner($this->db, $zone_templ_id, $_SESSION['userid']);
-        $perm_godlike = UserManager::verify_permission($this->db, 'user_is_ueberuser');
+        $userId = $this->userContext->getLoggedInUserId();
+        $owner = ZoneTemplate::getZoneTemplIsOwner($this->db, $zone_templ_id, $userId);
+        $perm_godlike = UserManager::verifyPermission($this->db, 'user_is_ueberuser');
 
         if (isset($_POST['edit']) && ($owner || $perm_godlike)) {
             $this->updateZoneTemplateDetails($zone_templ_id);
         }
 
-        // TODO: review this code
-//        if (isset($_POST['save_as'])) {
-//            if (ZoneTemplate::zone_templ_name_exists($_POST['templ_name'])) {
-//                error(ERR_ZONE_TEMPL_EXIST);
-//            } elseif ($_POST['templ_name'] == '') {
-//                error(ERR_ZONE_TEMPL_IS_EMPTY);
-//            } else {
-//                ZoneTemplate::add_zone_templ_save_as($_POST['templ_name'], $_POST['templ_descr'], $_SESSION['userid'], $_POST['record']);
-//                $this->setMessage('list_zone_templ', 'success', SUC_ZONE_TEMPL_ADD);
-//                $this->redirect('index.php', ['page'=> 'list_zone_templ.php']);
-//            }
-//        }
+        if (isset($_POST['save_as'])) {
+            $this->saveTemplateAs($zone_templ_id);
+        }
 
         if (isset($_POST['update_zones'])) {
             $this->updateZoneRecords($zone_templ_id);
         }
     }
 
-    private function showForm(string $zone_templ_id): void
+    private function showForm(int $zone_templ_id): void
     {
-        $iface_rowamount = $this->config('iface_rowamount');
+        $paginationService = $this->createPaginationService();
+        $default_rowamount = $this->config->get('interface', 'rows_per_page', 10);
+        $iface_rowamount = $paginationService->getUserRowsPerPage($default_rowamount, $this->getCurrentUserId());
         $row_start = $this->getRowStart($iface_rowamount);
-        $record_sort_by = $this->getSortBy();
-        $record_count = ZoneTemplate::count_zone_templ_records($this->db, $zone_templ_id);
-        $templ_details = ZoneTemplate::get_zone_templ_details($this->db, $zone_templ_id);
+        $record_sort_by = $this->getSortBy('record_sort_by', ['name', 'type', 'content', 'ttl', 'prio']);
+        $record_count = ZoneTemplate::countZoneTemplRecords($this->db, $zone_templ_id);
+        $templ_details = ZoneTemplate::getZoneTemplDetails($this->db, $zone_templ_id);
+
+        // Get count of zones using this template
+        $zoneTemplate = new ZoneTemplate($this->db, $this->getConfig(), $this->createDnsBackendProvider());
+        $userId = $this->userContext->getLoggedInUserId();
+        $linked_zones = $zoneTemplate->getListZoneUseTempl($zone_templ_id, $userId);
+        $zones_linked_count = count($linked_zones);
+
+        // Get sync status
+        $syncService = new ZoneTemplateSyncService($this->db, $this->getConfig(), $this->createDnsBackendProvider());
+        $unsynced_zones_count = $syncService->getUnsyncedZoneCount($zone_templ_id);
 
         $this->render('edit_zone_templ.html', [
             'templ_details' => $templ_details,
             'pagination' => $this->createAndPresentPagination($record_count, $iface_rowamount, $zone_templ_id),
-            'records' => ZoneTemplate::get_zone_templ_records($this->db, $zone_templ_id, $row_start, $iface_rowamount, $record_sort_by),
+            'records' => ZoneTemplate::getZoneTemplRecords($this->db, $zone_templ_id, $row_start, $iface_rowamount, $record_sort_by),
             'zone_templ_id' => $zone_templ_id,
-            'perm_is_godlike' => UserManager::verify_permission($this->db, 'user_is_ueberuser'),
+            'zones_linked_count' => $zones_linked_count,
+            'unsynced_zones_count' => $unsynced_zones_count,
+            'perm_is_godlike' => UserManager::verifyPermission($this->db, 'user_is_ueberuser'),
+            'perm_zone_templ_add' => UserManager::verifyPermission($this->db, 'zone_templ_add'),
         ]);
     }
 
@@ -123,7 +155,8 @@ class EditZoneTemplController extends BaseController
 
         $paginationService = new PaginationService();
         $pagination = $paginationService->createPagination($totalItems, $itemsPerPage, $currentPage);
-        $presenter = new PaginationPresenter($pagination, 'index.php?page=edit_zone_templ&start={PageNumber}', $id);
+        $baseUrlPrefix = $this->config->get('interface', 'base_url_prefix', '');
+        $presenter = new PaginationPresenter($pagination, $baseUrlPrefix . '/zones/templates/' . $id . '/edit?start={PageNumber}', $id);
 
         return $presenter->present();
     }
@@ -140,39 +173,133 @@ class EditZoneTemplController extends BaseController
         return $row_start;
     }
 
-    public function getSortBy()
+    public function getSortBy(string $name, array $allowedValues): string
     {
-        $record_sort_by = 'name';
-        if (isset($_GET["record_sort_by"]) && preg_match("/^[a-z_]+$/", $_GET["record_sort_by"])) {
-            $record_sort_by = $_GET["record_sort_by"];
-            $_SESSION["record_sort_by"] = $_GET["record_sort_by"];
-        } elseif (isset($_POST["record_sort_by"]) && preg_match("/^[a-z_]+$/", $_POST["record_sort_by"])) {
-            $record_sort_by = $_POST["record_sort_by"];
-            $_SESSION["record_sort_by"] = $_POST["record_sort_by"];
-        } elseif (isset($_SESSION["record_sort_by"])) {
-            $record_sort_by = $_SESSION["record_sort_by"];
+        $sortOrder = 'name';
+
+        foreach ([$_GET, $_POST, $_SESSION] as $source) {
+            if (isset($source[$name]) && in_array($source[$name], $allowedValues)) {
+                $sortOrder = $source[$name];
+                $_SESSION[$name] = $source[$name];
+                break;
+            }
         }
-        return $record_sort_by;
+
+        return $sortOrder;
     }
 
-    public function updateZoneTemplateDetails(string $zone_templ_id): void
+    public function updateZoneTemplateDetails(int $zone_templ_id): void
     {
-        if (!isset($_POST['templ_name']) || $_POST['templ_name'] == "") {
-            $this->showError(_('Invalid or unexpected input given.'));
+        $constraints = [
+            'templ_name' => [
+                new Assert\NotBlank()
+            ],
+            'templ_descr' => [
+                new Assert\Length(max: 1024)
+            ]
+        ];
+
+        $this->setValidationConstraints($constraints);
+
+        if (!$this->doValidateRequest($_POST)) {
+            $this->showFirstValidationError($_POST);
+            return;
         }
-        ZoneTemplate::edit_zone_templ($this->db, $_POST, $zone_templ_id, $_SESSION['userid']);
+
+        $zoneTemplate = new ZoneTemplate($this->db, $this->config, $this->createDnsBackendProvider());
+        $userId = $this->userContext->getLoggedInUserId();
+        $zoneTemplate->editZoneTempl($_POST, $zone_templ_id, $userId);
+        $auditService = new AuditService($this->db);
+        $auditService->logZoneTemplateEdit($zone_templ_id, $_POST['templ_name'] ?? '');
         $this->setMessage('list_zone_templ', 'success', _('Zone template has been updated successfully.'));
-        $this->redirect('index.php', ['page'=> 'list_zone_templ']);
+        $this->redirect('/zones/templates');
     }
 
-    public function updateZoneRecords(string $zone_templ_id): void
+    public function updateZoneRecords(int $zone_templ_id): void
     {
-        $zoneTemplate = new ZoneTemplate($this->db, $this->getConfig());
-        $zones = $zoneTemplate->get_list_zone_use_templ($zone_templ_id, $_SESSION['userid']);
+        $zoneTemplate = new ZoneTemplate($this->db, $this->getConfig(), $this->createDnsBackendProvider());
+        $userId = $this->userContext->getLoggedInUserId();
+        $zones = $zoneTemplate->getZoneAndDomainIdsByTemplate($zone_templ_id, $userId);
         $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-        foreach ($zones as $zone_id) {
-            $dnsRecord->update_zone_records($this->config('db_type'), $this->config('dns_ttl'), $zone_id, $zone_templ_id);
+        $syncService = new ZoneTemplateSyncService($this->db, $this->getConfig(), $this->createDnsBackendProvider());
+
+        $syncedZoneIds = [];
+        foreach ($zones as $zone) {
+            // PowerDNS record updates use domain_id; sync tracking uses Poweradmin zones.id.
+            $dnsRecord->updateZoneRecords($this->config->get('database', 'type', 'mysql'), $this->config->get('dns', 'ttl', 86400), $zone['domain_id'], $zone_templ_id);
+            $syncedZoneIds[] = $zone['zone_id'];
         }
+
+        $syncService->markZonesAsSynced($syncedZoneIds, $zone_templ_id);
+
         $this->setMessage('edit_zone_templ', 'success', _('Zones have been updated successfully.'));
+        $this->redirect('/zones/templates/' . $zone_templ_id . '/edit');
+    }
+
+    private function saveTemplateAs(int $zone_templ_id): void
+    {
+        // Check if user has permission to add templates
+        if (
+            !(UserManager::verifyPermission($this->db, 'zone_templ_add') ||
+              UserManager::verifyPermission($this->db, 'user_is_ueberuser'))
+        ) {
+            $this->showError(_('You do not have permission to create new zone templates.'));
+            return;
+        }
+
+        $constraints = [
+            'templ_name' => [
+                new Assert\NotBlank()
+            ],
+            'templ_descr' => [
+                new Assert\Length(max: 1024)
+            ]
+        ];
+
+        $this->setValidationConstraints($constraints);
+
+        if (!$this->doValidateRequest($_POST)) {
+            $this->showFirstValidationError($_POST);
+            return;
+        }
+
+        $zoneTemplate = new ZoneTemplate($this->db, $this->config, $this->createDnsBackendProvider());
+        $templateExists = $zoneTemplate->zoneTemplNameExists($_POST['templ_name']);
+        $currentTemplate = ZoneTemplate::getZoneTemplDetails($this->db, $zone_templ_id);
+
+        if ($templateExists) {
+            $this->showError(_('Zone template with this name already exists, please choose another one.'));
+            return;
+        }
+
+        // Don't allow saving with the same name
+        if ($_POST['templ_name'] === $currentTemplate['name']) {
+            $this->showError(_('Please enter a different name when using Save As.'));
+            return;
+        }
+
+        // Get records from the current template
+        $records = ZoneTemplate::getZoneTemplRecords($this->db, $zone_templ_id);
+
+        // For a simple "save as" with no domain substitution
+        $options = [];
+        if (isset($_POST['templ_global'])) {
+            $options['global'] = true;
+        }
+
+        // Call the addZoneTemplSaveAs with the correct signature
+        $success = $zoneTemplate->addZoneTemplSaveAs(
+            $_POST['templ_name'],
+            $_POST['templ_descr'],
+            $_SESSION['userid'],
+            $records,
+            $options,
+            '' // Empty domain since we're not doing domain substitution
+        );
+
+        if ($success) {
+            $this->setMessage('list_zone_templ', 'success', _('Zone template has been copied successfully.'));
+            $this->redirect('/zones/templates');
+        }
     }
 }

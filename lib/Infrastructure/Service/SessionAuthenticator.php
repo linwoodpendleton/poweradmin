@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2026 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -23,43 +23,87 @@
 namespace Poweradmin\Infrastructure\Service;
 
 use PDO;
-use Poweradmin\AppConfiguration;
+use Poweradmin\Application\Service\LoggingService;
 use Poweradmin\Application\Service\CsrfTokenService;
 use Poweradmin\Application\Service\LdapAuthenticator;
+use Poweradmin\Application\Service\LoginAttemptService;
 use Poweradmin\Application\Service\SqlAuthenticator;
+use Poweradmin\Application\Service\RecaptchaService;
+use Poweradmin\Application\Service\UserProvisioningService;
+use Poweradmin\Infrastructure\Configuration\ConfigurationManager;
 use Poweradmin\Application\Service\UserEventLogger;
 use Poweradmin\Domain\Model\SessionEntity;
 use Poweradmin\Domain\Service\AuthenticationService;
 use Poweradmin\Domain\Service\PasswordEncryptionService;
 use Poweradmin\Domain\Service\SessionService;
-use Poweradmin\Infrastructure\Database\PDOLayer;
+use Poweradmin\Domain\Service\MfaService;
+use Poweradmin\Domain\Service\UserAgreementService;
+use Poweradmin\Domain\Service\UserContextService;
+use Poweradmin\Domain\Service\UserTimezoneService;
 use Poweradmin\Infrastructure\Logger\LdapUserEventLogger;
+use Poweradmin\Infrastructure\Utility\IpAddressRetriever;
+use Poweradmin\Infrastructure\Logger\Logger;
+use Poweradmin\Infrastructure\Logger\LoggerHandlerFactory;
+use Poweradmin\Infrastructure\Repository\DbUserAgreementRepository;
+use Poweradmin\Application\Service\AuditService;
+use Poweradmin\Infrastructure\Repository\DbUserMfaRepository;
+use Poweradmin\Application\Service\MailService;
+use ReflectionClass;
 
-class SessionAuthenticator
+class SessionAuthenticator extends LoggingService
 {
-    private AuthenticationService $authenticationService;
-    private PDOLayer $db;
-    private AppConfiguration $config;
+    private AuthenticationService $authService;
+    private PDO $db;
+    private ConfigurationManager $configManager;
     private UserEventLogger $userEventLogger;
     private LdapUserEventLogger $ldapUserEventLogger;
     private CsrfTokenService $csrfTokenService;
     private LdapAuthenticator $ldapAuthenticator;
     private SqlAuthenticator $sqlAuthenticator;
+    private LoginAttemptService $loginAttemptService;
+    private RecaptchaService $recaptchaService;
+    private RedirectService $redirectService;
 
-    public function __construct(PDOLayer $db, AppConfiguration $config) {
-        $this->db = $db;
-        $this->config = $config;
+    public function __construct(PDO $connection, ConfigurationManager $configManager)
+    {
+        $shortClassName = (new ReflectionClass(self::class))->getShortName();
+        $loggerLevel = $configManager->get('logging', 'level', 'info');
+        parent::__construct(new Logger(LoggerHandlerFactory::create($configManager->getAll()), $loggerLevel), $shortClassName);
+
+        $this->db = $connection;
+        $this->configManager = $configManager;
 
         $sessionService = new SessionService();
-        $redirectService = new RedirectService();
-        $this->authenticationService = new AuthenticationService($sessionService, $redirectService);
+        $this->redirectService = new RedirectService();
+        $this->authService = new AuthenticationService($sessionService, $this->redirectService);
         $this->csrfTokenService = new CsrfTokenService();
 
-        $this->userEventLogger = new UserEventLogger($db);
-        $this->ldapUserEventLogger = new LdapUserEventLogger($db);
+        $this->userEventLogger = new UserEventLogger($connection);
+        $this->ldapUserEventLogger = new LdapUserEventLogger($connection);
 
-        $this->ldapAuthenticator = new LdapAuthenticator($db, $config, $this->ldapUserEventLogger, $this->authenticationService, $this->csrfTokenService);
-        $this->sqlAuthenticator = new SqlAuthenticator($db, $config, $this->userEventLogger, $this->authenticationService, $this->csrfTokenService);
+        $this->loginAttemptService = new LoginAttemptService($connection, $this->configManager);
+        $this->recaptchaService = new RecaptchaService($configManager);
+
+        $userContextService = new UserContextService();
+        $this->ldapAuthenticator = new LdapAuthenticator(
+            $connection,
+            $configManager,
+            $this->ldapUserEventLogger,
+            $this->authService,
+            $this->csrfTokenService,
+            $this->logger,
+            $this->loginAttemptService,
+            $userContextService
+        );
+        $this->sqlAuthenticator = new SqlAuthenticator(
+            $connection,
+            $configManager,
+            $this->userEventLogger,
+            $this->authService,
+            $this->csrfTokenService,
+            $this->logger,
+            $this->loginAttemptService
+        );
     }
 
     /** Authenticate Session
@@ -69,69 +113,308 @@ class SessionAuthenticator
      *
      * @return void
      */
-    function authenticate(): void
+    public function authenticate(): void
     {
-        $iface_expire = $this->config->get('iface_expire');
-        $session_key = $this->config->get('session_key');
-        $ldap_use = $this->config->get('ldap_use');
+        $this->logDebug('Starting authentication process');
 
-        if (isset($_SESSION['userid']) && isset($_SERVER["QUERY_STRING"]) && $_SERVER["QUERY_STRING"] == "logout") {
-            $sessionEntity = new SessionEntity(_('You have logged out.'), 'success');
-            $this->authenticationService->logout($sessionEntity);
-            return;
-        }
+        $iface_expire = $this->configManager->get('interface', 'session_timeout', 1800);
+        $session_key = $this->configManager->get('security', 'session_key', '');
+        $ldap_use = $this->configManager->get('ldap', 'enabled', false);
+        $login_token_validation = $this->configManager->get('security', 'login_token_validation', true);
+        $global_token_validation = $this->configManager->get('security', 'global_token_validation', true);
+
+        // Logout is now handled by LogoutController via /logout route
 
         $login_token = $_POST['_token'] ?? '';
-        if (isset($_POST['authenticate']) && !$this->csrfTokenService->validateToken($login_token, 'login_token')) {
+        if (
+            ($login_token_validation || $global_token_validation)
+            && isset($_POST['authenticate'])
+            && !$this->csrfTokenService->validateToken($login_token, 'login_token')
+        ) {
+            $this->logWarning('Invalid CSRF token for user {username}', ['username' => $_POST['username'] ?? 'unknown']);
+
             $sessionEntity = new SessionEntity(_('Invalid CSRF token.'), 'danger');
-            $this->authenticationService->auth($sessionEntity);
+            $this->authService->auth($sessionEntity);
+
+            $this->logDebug('CSRF token validation failed for user {username}', ['username' => $_POST['username'] ?? 'unknown']);
             return;
         }
 
         // If a user had just entered his/her login && password, store them in our session.
         if (isset($_POST["authenticate"])) {
+            $this->logDebug('User {username} attempting to authenticate', ['username' => $_POST["username"] ?? 'unknown']);
+
+            // Verify reCAPTCHA if enabled
+            if ($this->recaptchaService->isEnabled()) {
+                $recaptchaResponse = $_POST['g-recaptcha-response'] ?? '';
+                $remoteIp = (new IpAddressRetriever($_SERVER))->getClientIp();
+
+                if (!$this->recaptchaService->verify($recaptchaResponse, $remoteIp)) {
+                    $this->logWarning('reCAPTCHA verification failed for user {username}', ['username' => $_POST['username'] ?? 'unknown']);
+
+                    $sessionEntity = new SessionEntity(_('reCAPTCHA verification failed. Please try again.'), 'danger');
+                    $this->authService->auth($sessionEntity);
+
+                    $this->logDebug('Authentication blocked due to reCAPTCHA failure for user {username}', ['username' => $_POST['username'] ?? 'unknown']);
+                    return;
+                }
+            }
+
             if ($_POST['password'] != '') {
                 $passwordEncryptionService = new PasswordEncryptionService($session_key);
                 $_SESSION["userpwd"] = $passwordEncryptionService->encrypt($_POST['password']);
+                $this->logDebug('Password encrypted for user {username}', ['username' => $_POST["username"]]);
 
                 $_SESSION["userlogin"] = $_POST["username"];
-                $_SESSION["userlang"] = $_POST["userlang"] ?? $this->config->get('iface_lang');
+                $this->logDebug('User login set for user {username}', ['username' => $_POST["username"]]);
+
+                $_SESSION["userlang"] = $_POST["userlang"] ?? $this->configManager->get('interface', 'language', 'en_EN');
+                $this->logDebug('User language set for user {username}', ['username' => $_POST["username"]]);
+
+                $this->logInfo('User {username} authenticated', ['username' => $_POST["username"]]);
             } else {
+                $this->logError('Empty password attempt for user {username}', ['username' => $_POST["username"] ?? 'unknown']);
+
                 $sessionEntity = new SessionEntity(_('An empty password is not allowed'), 'danger');
-                $this->authenticationService->auth($sessionEntity);
+                $this->authService->auth($sessionEntity);
+
+                $this->logDebug('Authentication failed due to empty password for user {username}', ['username' => $_POST["username"] ?? 'unknown']);
                 return;
             }
         }
 
         // Check if the session hasn't expired yet.
-        if ((isset($_SESSION["userid"])) && ($_SESSION["lastmod"] != "") && ((time() - $_SESSION["lastmod"]) > $iface_expire)) {
+        if (isset($_SESSION["userid"]) && isset($_SESSION["lastmod"]) && $_SESSION["lastmod"] !== "" && ((time() - $_SESSION["lastmod"]) > $iface_expire)) {
+            $this->logInfo('Session expired for user {userid}', ['userid' => $_SESSION["userid"]]);
+
+            $auditService = new AuditService($this->db);
+            $auditService->logSessionExpired();
+
             $sessionEntity = new SessionEntity(_('Session expired, please login again.'), 'danger');
-            $this->authenticationService->logout($sessionEntity);
+            $this->authService->logout($sessionEntity);
+
+            $this->logDebug('Session expired and user {userid} logged out', ['userid' => $_SESSION["userid"]]);
             return;
         }
 
         // If the session hasn't expired yet, give our session a fresh new timestamp.
         $_SESSION["lastmod"] = time();
+        $this->logDebug('Session timestamp updated for user {username}', ['username' => $_SESSION["userlogin"] ?? 'unknown']);
 
-        if ($ldap_use && $this->userUsesLDAP()) {
-            $this->ldapAuthenticator->authenticate();
-        } else {
-            $this->sqlAuthenticator->authenticate();
+        $authMethod = $this->getUserAuthMethod();
+
+        switch ($authMethod) {
+            case UserProvisioningService::AUTH_METHOD_OIDC:
+                $this->logInfo('User {username} uses OIDC for authentication - skipping password verification', ['username' => $_SESSION["userlogin"] ?? 'unknown']);
+                // OIDC users are already authenticated, no need to verify password
+                break;
+            case UserProvisioningService::AUTH_METHOD_SAML:
+                $this->logInfo('User {username} uses SAML for authentication - skipping password verification', ['username' => $_SESSION["userlogin"] ?? 'unknown']);
+                // SAML users are already authenticated, no need to verify password
+                break;
+            case UserProvisioningService::AUTH_METHOD_LDAP:
+                if ($ldap_use) {
+                    $this->logInfo('User {username} uses LDAP for authentication', ['username' => $_SESSION["userlogin"]]);
+                    $this->ldapAuthenticator->authenticate();
+                } else {
+                    $this->logWarning('User {username} configured for LDAP but LDAP is disabled', ['username' => $_SESSION["userlogin"]]);
+                    $sessionEntity = new SessionEntity(_('LDAP authentication is disabled'), 'danger');
+                    $this->authService->logout($sessionEntity);
+                }
+                break;
+            case 'sql':
+            default:
+                if (isset($_SESSION["userlogin"])) {
+                    $this->logInfo('User {username} uses SQL for authentication', ['username' => $_SESSION["userlogin"]]);
+                }
+                $this->sqlAuthenticator->authenticate();
+                break;
+        }
+
+        // Check for user agreement requirements after successful authentication
+        $this->checkUserAgreementRequirements();
+
+        // Check for MFA enforcement requirements after user agreement
+        $this->checkMfaEnforcementRequirements();
+
+        $this->logDebug('Authentication process completed for user {username}', ['username' => $_SESSION["userlogin"] ?? 'unknown']);
+    }
+
+    private function checkUserAgreementRequirements(): void
+    {
+        $userContextService = new UserContextService();
+
+        // Only check if user is authenticated and not in API context
+        if (!$userContextService->isAuthenticated()) {
+            return;
+        }
+
+        // Get the current request path (without base_url_prefix)
+        $currentPath = $this->getCurrentRequestPath();
+
+        // Skip agreement check for API requests and specific paths
+        $skipPaths = ['/user-agreement', '/logout', '/mfa/verify', '/mfa/setup'];
+        if ($this->isPathInList($currentPath, $skipPaths) || str_contains($currentPath, '/api/')) {
+            return;
+        }
+
+        $agreementService = new UserAgreementService(
+            new DbUserAgreementRepository($this->db, $this->configManager),
+            $this->configManager
+        );
+
+        $userId = $userContextService->getLoggedInUserId();
+        if ($userId && $agreementService->isAgreementRequired($userId)) {
+            $this->logInfo('User agreement required for user {userid}', ['userid' => $userId]);
+
+            // Redirect to agreement page - user will be sent to index after acceptance
+            $baseUrlPrefix = $this->configManager->get('interface', 'base_url_prefix', '');
+            $this->redirectService->redirectTo($baseUrlPrefix . '/user-agreement');
+        }
+    }
+
+    private function checkMfaEnforcementRequirements(): void
+    {
+        $userContextService = new UserContextService();
+
+        // Only check if user is authenticated
+        if (!$userContextService->isAuthenticated()) {
+            return;
+        }
+
+        // Get the current request path (without base_url_prefix)
+        $currentPath = $this->getCurrentRequestPath();
+
+        // Skip MFA enforcement check for specific paths and API requests
+        $skipPaths = ['/logout', '/mfa/verify', '/mfa/setup'];
+        if ($this->isPathInList($currentPath, $skipPaths) || str_contains($currentPath, '/api/')) {
+            return;
+        }
+
+        $userId = $userContextService->getLoggedInUserId();
+        if (!$userId) {
+            return;
+        }
+
+        // Create MFA service to check enforcement
+        $mfaService = new MfaService(
+            new DbUserMfaRepository($this->db, $this->configManager),
+            $this->configManager,
+            new MailService($this->configManager),
+            null,
+            UserTimezoneService::createDefault($this->db, $this->configManager)
+        );
+
+        // Check if MFA setup is required for this user
+        if ($mfaService->isMfaSetupRequired($userId, $this->db)) {
+            $this->logInfo('MFA setup required for user {userid}', ['userid' => $userId]);
+
+            // Set a session flag to indicate this is an enforced setup
+            $_SESSION['mfa_setup_enforced'] = true;
+
+            // Redirect to MFA setup page
+            $baseUrlPrefix = $this->configManager->get('interface', 'base_url_prefix', '');
+            $this->redirectService->redirectTo($baseUrlPrefix . '/mfa/setup');
+        }
+    }
+
+    /**
+     * Get the current request path without base_url_prefix.
+     *
+     * This extracts the path from REQUEST_URI and strips the base_url_prefix
+     * if configured, returning just the application route path.
+     *
+     * @return string The request path (e.g., '/mfa/setup', '/zones/forward')
+     */
+    private function getCurrentRequestPath(): string
+    {
+        $requestUri = $_SERVER['REQUEST_URI'] ?? '/';
+
+        // Remove query string if present
+        $path = parse_url($requestUri, PHP_URL_PATH) ?: '/';
+
+        // Strip base_url_prefix if configured
+        $baseUrlPrefix = $this->configManager->get('interface', 'base_url_prefix', '');
+        if (!empty($baseUrlPrefix) && str_starts_with($path, $baseUrlPrefix)) {
+            $path = substr($path, strlen($baseUrlPrefix));
+            if (empty($path)) {
+                $path = '/';
+            }
+        }
+
+        return $path;
+    }
+
+    /**
+     * Check if the current path matches any path in the skip list.
+     *
+     * @param string $currentPath The current request path
+     * @param array $skipPaths List of paths to skip
+     * @return bool True if path should be skipped
+     */
+    private function isPathInList(string $currentPath, array $skipPaths): bool
+    {
+        foreach ($skipPaths as $skipPath) {
+            if ($currentPath === $skipPath || str_starts_with($currentPath, $skipPath . '/')) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private function getUserAuthMethod(): string
+    {
+        if (!isset($_SESSION["userlogin"])) {
+            $this->logDebug('No user login found in session');
+            return 'sql'; // Default to SQL if no user logged in
+        }
+
+        // First check how the current session was created
+        if (isset($_SESSION["auth_method_used"])) {
+            $sessionAuthMethod = $_SESSION["auth_method_used"];
+            $this->logDebug('Using session auth method for user {username}: {authMethod}', [
+                'username' => $_SESSION["userlogin"],
+                'authMethod' => $sessionAuthMethod
+            ]);
+            return $sessionAuthMethod;
+        }
+
+        // Fall back to database auth_method (for existing SQL/LDAP sessions)
+        try {
+            $stmt = $this->db->prepare("SELECT auth_method FROM users WHERE username = :username");
+            $stmt->execute([
+                'username' => $_SESSION["userlogin"]
+            ]);
+            $rowObj = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if ($rowObj === false) {
+                $this->logWarning('User {username} not found in database', ['username' => $_SESSION["userlogin"]]);
+                return 'sql'; // Default to SQL if user not found
+            }
+
+            $authMethod = $rowObj['auth_method'] ?? 'sql';
+            $this->logDebug('Using database auth method for user {username}: {authMethod}', [
+                'username' => $_SESSION["userlogin"],
+                'authMethod' => $authMethod
+            ]);
+
+            return $authMethod;
+        } catch (\PDOException $e) {
+            $this->logError('Database error while fetching auth method for user {username}: {error}', [
+                'username' => $_SESSION["userlogin"],
+                'error' => $e->getMessage()
+            ]);
+
+            // Log out user and display error message
+            $sessionEntity = new SessionEntity(_('Database error: Unable to verify user authentication. Please check your database configuration.'), 'danger');
+            $this->authService->logout($sessionEntity);
+
+            return 'sql'; // Return default to prevent further errors
         }
     }
 
     private function userUsesLDAP(): bool
     {
-        if (!isset($_SESSION["userlogin"])) {
-            return false;
-        }
-
-        $stmt = $this->db->prepare("SELECT id FROM users WHERE username = :username AND use_ldap = 1");
-        $stmt->execute([
-            'username' => $_SESSION["userlogin"]
-        ]);
-        $rowObj = $stmt->fetch(PDO::FETCH_ASSOC);
-
-        return $rowObj !== false;
+        return $this->getUserAuthMethod() === UserProvisioningService::AUTH_METHOD_LDAP;
     }
 }

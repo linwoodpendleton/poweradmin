@@ -1,0 +1,45 @@
+name: Semgrep
+
+on:
+  push:
+    branches: [ "master", "develop", "release/4.2.x" ]
+  pull_request:
+    branches: [ "master", "develop", "release/4.2.x" ]
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  semgrep:
+    name: Semgrep scan
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep:latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run Semgrep
+        run: |
+          semgrep scan \
+            --config=p/php \
+            --config=p/security-audit \
+            --config=p/owasp-top-ten \
+            --config=p/secrets \
+            --exclude-rule=generic.html-templates.security.unquoted-attribute-var.unquoted-attribute-var \
+            --exclude-rule=generic.html-templates.security.var-in-href.var-in-href \
+            --exclude-rule=python.django.security.audit.xss.template-translate-as-no-escape.template-translate-as-no-escape \
+            --sarif \
+            --output=semgrep.sarif \
+            --error || true
+
+      - name: Upload SARIF to GitHub code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep

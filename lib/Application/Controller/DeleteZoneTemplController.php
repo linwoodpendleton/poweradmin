@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -25,27 +25,45 @@
  *
  * @package     Poweradmin
  * @copyright   2007-2010 Rejo Zenger <rejo@zenger.nl>
- * @copyright   2010-2024 Poweradmin Development Team
+ * @copyright   2010-2025 Poweradmin Development Team
  * @license     https://opensource.org/licenses/GPL-3.0 GPL
  */
 
 namespace Poweradmin\Application\Controller;
 
+use Poweradmin\Application\Service\AuditService;
 use Poweradmin\BaseController;
 use Poweradmin\Domain\Model\UserManager;
 use Poweradmin\Domain\Model\ZoneTemplate;
-use Valitron;
+use Symfony\Component\Validator\Constraints as Assert;
 
 class DeleteZoneTemplController extends BaseController
 {
+    public function __construct(array $request)
+    {
+        parent::__construct($request);
+    }
     public function run(): void
     {
-        $zone_templ_id = htmlspecialchars($_GET['id']);
-        $owner = ZoneTemplate::get_zone_templ_is_owner($this->db, $zone_templ_id, $_SESSION['userid']);
-        $perm_godlike = UserManager::verify_permission($this->db, 'user_is_ueberuser');
-        $perm_master_add = UserManager::verify_permission($this->db, 'zone_master_add');
+        $constraints = [
+            'id' => [
+                new Assert\NotBlank(),
+                new Assert\Type('numeric')
+            ]
+        ];
 
-        $this->checkCondition(!($perm_godlike || $perm_master_add && $owner), _("You do not have the permission to delete zone templates."));
+        $this->setValidationConstraints($constraints);
+
+        if (!$this->doValidateRequest($this->requestData)) {
+            $this->showFirstValidationError($this->requestData);
+        }
+
+        $zone_templ_id = htmlspecialchars($this->getSafeRequestValue('id'));
+        $owner = ZoneTemplate::getZoneTemplIsOwner($this->db, $zone_templ_id, $_SESSION['userid']);
+        $perm_godlike = UserManager::verifyPermission($this->db, 'user_is_ueberuser');
+        $perm_templ_edit = UserManager::verifyPermission($this->db, 'zone_templ_edit');
+
+        $this->checkCondition(!($perm_godlike || $perm_templ_edit && $owner), _("You do not have the permission to delete zone templates."));
 
         if (isset($_GET['confirm'])) {
             $this->deleteZoneTempl();
@@ -56,27 +74,33 @@ class DeleteZoneTemplController extends BaseController
 
     private function deleteZoneTempl(): void
     {
-        $v = new Valitron\Validator($_GET);
-        $v->rules([
-            'required' => ['id'],
-            'integer' => ['id'],
-        ]);
+        $constraints = [
+            'id' => [
+                new Assert\NotBlank(),
+                new Assert\Type('numeric')
+            ]
+        ];
 
-        if ($v->validate()) {
-            $zone_templ_id = htmlspecialchars($_GET['id']);
-            ZoneTemplate::delete_zone_templ($this->db, $zone_templ_id);
+        $this->setValidationConstraints($constraints);
 
+        if ($this->doValidateRequest($this->requestData)) {
+            $zone_templ_id = htmlspecialchars($this->getSafeRequestValue('id'));
+            $zoneTemplate = new ZoneTemplate($this->db, $this->config);
+            $zoneTemplate->deleteZoneTempl($zone_templ_id);
+
+            $auditService = new AuditService($this->db);
+            $auditService->logZoneTemplateDelete((int)$zone_templ_id);
             $this->setMessage('list_zone_templ', 'success', _('Zone template has been deleted successfully.'));
-            $this->redirect('index.php', ['page'=> 'list_zone_templ']);
+            $this->redirect('/zones/templates');
         } else {
-            $this->showFirstError($v->errors());
+            $this->showFirstValidationError($this->requestData);
         }
     }
 
     private function showDeleteZoneTempl(): void
     {
-        $zone_templ_id = htmlspecialchars($_GET['id']);
-        $templ_details = ZoneTemplate::get_zone_templ_details($this->db, $zone_templ_id);
+        $zone_templ_id = htmlspecialchars($this->getSafeRequestValue('id'));
+        $templ_details = ZoneTemplate::getZoneTemplDetails($this->db, $zone_templ_id);
 
         $this->render('delete_zone_templ.html', [
             'templ_name' => $templ_details['name'],

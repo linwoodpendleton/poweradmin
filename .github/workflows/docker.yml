@@ -1,0 +1,246 @@
+name: Docker Image Publish
+
+on:
+  workflow_run:
+    workflows: ["validations"]
+    types:
+      - completed
+    branches:
+      - master
+      - develop
+      - release/3.x
+      - release/4.x
+      - release/4.1.x
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - release/3.x
+      - release/4.x
+      - release/4.1.x
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GHCR_IMAGE_NAME: poweradmin
+  DOCKERHUB_IMAGE_NAME: poweradmin/poweradmin
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    permissions:
+      contents: write
+      packages: write
+      security-events: write
+      actions: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.ref }}
+
+      - name: Lint Dockerfile with hadolint
+        uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
+        with:
+          dockerfile: Dockerfile
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
+
+      - name: Login to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
+        with:
+          registry: docker.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6
+        with:
+          images: |
+            ghcr.io/${{ github.repository_owner }}/${{ env.GHCR_IMAGE_NAME }}
+            ${{ env.DOCKERHUB_IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable=${{ (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch == 'master') || (github.event_name != 'workflow_run' && github.ref == 'refs/heads/master') }}
+            type=raw,value=dev,enable=${{ (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch == 'develop') || (github.event_name != 'workflow_run' && github.ref == 'refs/heads/develop') }}
+            type=raw,value=lts,enable=${{ (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch == 'release/3.x') || (github.event_name != 'workflow_run' && github.ref == 'refs/heads/release/3.x') }}
+            type=raw,value=stable,enable=${{ (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch == 'release/4.x') || (github.event_name != 'workflow_run' && github.ref == 'refs/heads/release/4.x') }}
+            type=raw,value=next,enable=${{ (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch == 'release/4.1.x') || (github.event_name != 'workflow_run' && github.ref == 'refs/heads/release/4.1.x') }}
+
+      - name: Build local image for smoke test
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: poweradmin:smoke-test
+          cache-from: type=gha
+
+      - name: Smoke test (root mode - port 80)
+        run: |
+          docker run -d --name smoke-root \
+            -p 80:80 \
+            -e DB_TYPE=sqlite \
+            -e DB_NAME=/db/poweradmin.db \
+            -e DNS_HOSTMASTER=test.example.com \
+            -e DNS_NS1=ns1.example.com \
+            -e DNS_NS2=ns2.example.com \
+            poweradmin:smoke-test
+
+          for i in $(seq 1 60); do
+            if [ "$(docker inspect -f '{{.State.Status}}' smoke-root 2>/dev/null)" != "running" ]; then
+              echo "Root mode: container exited unexpectedly"
+              docker logs smoke-root
+              exit 1
+            fi
+            if curl -sf http://localhost:80/ -o /dev/null 2>/dev/null; then
+              echo "Root mode: container responded on port 80 (after ${i}s)"
+              break
+            fi
+            if [ "$i" = "60" ]; then
+              echo "Root mode: container failed to respond within 60s"
+              docker logs smoke-root
+              exit 1
+            fi
+            sleep 1
+          done
+
+          docker rm -f smoke-root
+
+      - name: Smoke test (non-root mode - port 8080)
+        if: >-
+          !(github.event_name == 'workflow_run' && github.event.workflow_run.head_branch == 'release/3.x')
+          && github.ref != 'refs/heads/release/3.x'
+        run: |
+          docker run -d --name smoke-nonroot \
+            --user 82:82 \
+            -p 8080:8080 \
+            -e DB_TYPE=sqlite \
+            -e DB_NAME=/db/poweradmin.db \
+            -e DNS_HOSTMASTER=test.example.com \
+            -e DNS_NS1=ns1.example.com \
+            -e DNS_NS2=ns2.example.com \
+            poweradmin:smoke-test
+
+          for i in $(seq 1 60); do
+            if [ "$(docker inspect -f '{{.State.Status}}' smoke-nonroot 2>/dev/null)" != "running" ]; then
+              echo "Non-root mode: container exited unexpectedly"
+              docker logs smoke-nonroot
+              exit 1
+            fi
+            if curl -sf http://localhost:8080/ -o /dev/null 2>/dev/null; then
+              echo "Non-root mode: container responded on port 8080 (after ${i}s)"
+              break
+            fi
+            if [ "$i" = "60" ]; then
+              echo "Non-root mode: container failed to respond within 60s"
+              docker logs smoke-nonroot
+              exit 1
+            fi
+            sleep 1
+          done
+
+          docker rm -f smoke-nonroot
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run Trivy vulnerability scanner
+        if: github.event_name != 'pull_request' && success()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        if: github.event_name != 'pull_request' && success()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Generate SBOM
+        if: github.event_name != 'pull_request' && success()
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Upload SBOM as artifact
+        if: github.event_name != 'pull_request' && success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom-${{ github.run_id }}
+          path: sbom.spdx.json
+
+      - name: Attest build provenance
+        if: github.event_name != 'pull_request' && success()
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+
+      - name: Job Summary
+        if: always()
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_ID: ${{ github.run_id }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          echo "### Docker Build Summary 🐳" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Build Information:**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Tags: $IMAGE_TAGS" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Platforms: linux/amd64, linux/arm64" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Digest: $IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Security & Compliance:**" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "- ✅ Vulnerability scan completed" >> "$GITHUB_STEP_SUMMARY"
+            echo "- ✅ SBOM generated (artifact: sbom-$RUN_ID)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- ✅ Build provenance attested" >> "$GITHUB_STEP_SUMMARY"
+            echo "- ✅ Images pushed to GHCR and Docker Hub" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- 🔍 Build-only mode (PR)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- ⏭️ Security scans skipped" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Workflow:** $WORKFLOW_NAME (#$RUN_NUMBER)" >> "$GITHUB_STEP_SUMMARY"

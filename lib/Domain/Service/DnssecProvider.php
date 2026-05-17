@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -22,7 +22,8 @@
 
 namespace Poweradmin\Domain\Service;
 
-interface DnssecProvider {
+interface DnssecProvider
+{
     public function rectifyZone(string $zoneName): bool;
     public function secureZone(string $zoneName): bool;
     public function unsecureZone(string $zoneName): bool;
@@ -37,4 +38,18 @@ interface DnssecProvider {
     public function keyExists(string $zoneName, int $keyId): bool;
     public function getZoneKey(string $zoneName, int $keyId): array;
     public function isDnssecEnabled(): bool;
+
+    /**
+     * Import a DNSSEC key from a PEM-encoded private key. Requires PowerDNS
+     * 4.7+; older servers should return false. Implementations that do not
+     * back onto the PowerDNS API may also return false.
+     */
+    public function importZoneKey(string $zoneName, string $keyType, string $algorithm, string $privateKeyPem): bool;
+
+    /**
+     * Export the PEM-encoded private key for an existing cryptokey, or null
+     * when the server does not support PEM export (pre-4.7) or the key
+     * cannot be read.
+     */
+    public function exportZoneKeyPem(string $zoneName, int $keyId): ?string;
 }

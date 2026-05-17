@@ -1,9 +1,10 @@
 <?php
+
 /*  Poweradmin, a friendly web-based admin tool for PowerDNS.
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -33,7 +34,7 @@ class UserAuthenticationService
     private string $passwordEncryption;
     private int $passwordEncryptionCost;
 
-    public function __construct(string $passwordEncryption = 'bcrypt', int $passwordEncryptionCost = 10)
+    public function __construct(string $passwordEncryption = 'bcrypt', int $passwordEncryptionCost = 12)
     {
         $this->passwordEncryption = $passwordEncryption;
         $this->passwordEncryptionCost = $passwordEncryptionCost;
@@ -79,15 +80,7 @@ class UserAuthenticationService
             return password_hash($password, PASSWORD_ARGON2ID);
         }
 
-        if ($this->passwordEncryption === 'md5salt') {
-            return $this->generateCombinedSalt($password);
-        }
-
-        if ($this->passwordEncryption === 'md5') {
-            return md5($password);
-        }
-
-        throw new InvalidArgumentException('Invalid password encryption method');
+        throw new InvalidArgumentException("Invalid password encryption method: '{$this->passwordEncryption}'. Supported methods: bcrypt, argon2i, argon2id");
     }
 
     /**

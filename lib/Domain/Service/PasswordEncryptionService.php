@@ -1,9 +1,10 @@
 <?php
+
 /*  Poweradmin, a friendly web-based admin tool for PowerDNS.
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -23,8 +24,8 @@ namespace Poweradmin\Domain\Service;
 
 class PasswordEncryptionService
 {
-    const ALGORITHM = 'aes-256-cbc';
-    const IV_LENGTH = 16;
+    private const ALGORITHM = 'aes-256-cbc';
+    private const IV_LENGTH = 16;
     private string $session_key;
 
     public function __construct(string $session_key)
@@ -65,6 +66,6 @@ class PasswordEncryptionService
 
     private function computeIV(): string
     {
-        return openssl_random_pseudo_bytes(self::IV_LENGTH);
+        return random_bytes(self::IV_LENGTH);
     }
 }

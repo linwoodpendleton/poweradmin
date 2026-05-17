@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -22,13 +22,16 @@
 
 namespace Poweradmin\Domain\Model;
 
-class DnssecAlgorithmName {
+use Poweradmin\Domain\Service\PdnsCapabilities;
+
+class DnssecAlgorithmName
+{
     public const RSAMD5 = 'rsamd5';
     public const DH = 'dh';
     public const DSA = 'dsa';
     public const ECC = 'ecc';
     public const RSASHA1 = 'rsasha1';
-    public const RSASHA1_NSEC3 = 'rsasha1-nsec3';
+    public const RSASHA1_NSEC3_SHA1 = 'rsasha1-nsec3-sha1';
     public const RSASHA256 = 'rsasha256';
     public const RSASHA512 = 'rsasha512';
     public const GOST = 'gost';
@@ -43,7 +46,7 @@ class DnssecAlgorithmName {
         self::DSA => 'DSA',
         self::ECC => 'ECC',
         self::RSASHA1 => 'RSASHA1',
-        self::RSASHA1_NSEC3 => 'RSASHA1-NSEC3-SHA1',
+        self::RSASHA1_NSEC3_SHA1 => 'RSASHA1-NSEC3-SHA1',
         self::RSASHA256 => 'RSASHA256',
         self::RSASHA512 => 'RSASHA512',
         self::GOST => 'ECC-GOST',
@@ -52,4 +55,68 @@ class DnssecAlgorithmName {
         self::ED25519 => 'ED25519',
         self::ED448 => 'ED448',
     ];
+
+    /**
+     * Algorithms the Poweradmin DNSSEC flows accept on creation/import. The
+     * obsolete ones in ALGORITHM_NAMES (RSAMD5, DH, DSA, ECC, GOST) are
+     * rejected by modern PowerDNS builds and would only frustrate users.
+     */
+    public const SUPPORTED_ALGORITHMS = [
+        self::RSASHA1,
+        self::RSASHA1_NSEC3_SHA1,
+        self::RSASHA256,
+        self::RSASHA512,
+        self::ECDSA256,
+        self::ECDSA384,
+        self::ED25519,
+        self::ED448,
+    ];
+
+    /**
+     * Algorithms that only became available from a particular PowerDNS
+     * release. Anything not listed here has been supported for as long as
+     * the API has existed, so we don't gate it.
+     */
+    private const ALGORITHM_MIN_VERSION = [
+        self::ED448 => '4.5.0',
+    ];
+
+    /**
+     * Algorithm IDs the connected server is expected to accept. Algorithms
+     * with a min PowerDNS version are dropped when the connected server is
+     * too old (or its version cannot be confirmed). Pass null for $caps to
+     * skip version filtering.
+     *
+     * @return array<int, string>
+     */
+    public static function getSupportedAlgorithmsForCapabilities(?PdnsCapabilities $caps): array
+    {
+        if ($caps === null) {
+            return self::SUPPORTED_ALGORITHMS;
+        }
+        $out = [];
+        foreach (self::SUPPORTED_ALGORITHMS as $alg) {
+            $minVer = self::ALGORITHM_MIN_VERSION[$alg] ?? null;
+            if ($minVer === null || $caps->isAtLeast($minVer)) {
+                $out[] = $alg;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * id => display-name map for use in dropdowns. Mirrors
+     * getSupportedAlgorithmsForCapabilities() so the dropdown and the
+     * controller allowlist never drift.
+     *
+     * @return array<string, string>
+     */
+    public static function getSupportedAlgorithmNamesForCapabilities(?PdnsCapabilities $caps): array
+    {
+        $out = [];
+        foreach (self::getSupportedAlgorithmsForCapabilities($caps) as $alg) {
+            $out[$alg] = self::ALGORITHM_NAMES[$alg];
+        }
+        return $out;
+    }
 }

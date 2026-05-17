@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2026 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -25,99 +25,209 @@ namespace Poweradmin\Application\Service;
 use PDO;
 use Poweradmin\Domain\Model\SessionEntity;
 use Poweradmin\Domain\Model\UserManager;
-use Poweradmin\Domain\Service\AuthenticationService;
+use Poweradmin\Domain\Service\MfaService;
+use Poweradmin\Domain\Service\MfaSessionManager;
 use Poweradmin\Domain\Service\PasswordEncryptionService;
-use Poweradmin\Infrastructure\Database\PDOLayer;
-use Poweradmin\AppConfiguration;
+use Poweradmin\Domain\Service\UserTimezoneService;
+use Poweradmin\Infrastructure\Configuration\ConfigurationManager;
+use Poweradmin\Infrastructure\Logger\Logger;
+use Poweradmin\Infrastructure\Repository\DbUserMfaRepository;
+use Poweradmin\Infrastructure\Utility\IpAddressRetriever;
+use ReflectionClass;
 
-class SqlAuthenticator
+class SqlAuthenticator extends LoggingService
 {
-    private PDOLayer $db;
-    private AppConfiguration $config;
+    private PDO $connection;
+    private ConfigurationManager $configManager;
     private UserEventLogger $userEventLogger;
-    private AuthenticationService $authenticationService;
+    private $authService; // Can be either AuthenticationService or UserAuthenticationService
     private CsrfTokenService $csrfTokenService;
+    private LoginAttemptService $loginAttemptService;
+    private array $serverParams;
+    private ?MfaService $mfaService = null;
 
-    public function __construct(PDOLayer $db, AppConfiguration $config, UserEventLogger $userEventLogger, AuthenticationService $authenticationService, CsrfTokenService $csrfTokenService)
-    {
-        $this->db = $db;
-        $this->config = $config;
+    public function __construct(
+        PDO $connection,
+        ConfigurationManager $configManager,
+        UserEventLogger $userEventLogger,
+        $authService, // Changed type to allow UserAuthenticationService
+        CsrfTokenService $csrfTokenService,
+        Logger $logger,
+        LoginAttemptService $loginAttemptService,
+        array $serverParams = []
+    ) {
+        $shortClassName = (new ReflectionClass(self::class))->getShortName();
+        parent::__construct($logger, $shortClassName);
+
+        $this->connection = $connection;
+        $this->configManager = $configManager;
         $this->userEventLogger = $userEventLogger;
-        $this->authenticationService = $authenticationService;
+        $this->authService = $authService;
         $this->csrfTokenService = $csrfTokenService;
+        $this->loginAttemptService = $loginAttemptService;
+        $this->serverParams = $serverParams ?: $_SERVER;
+
+        // Initialize MFA service
+        $userMfaRepository = new DbUserMfaRepository($connection, $configManager);
+        $mailService = new MailService($configManager);
+        $this->mfaService = new MfaService(
+            $userMfaRepository,
+            $configManager,
+            $mailService,
+            null,
+            UserTimezoneService::createDefault($connection, $configManager)
+        );
     }
 
     public function authenticate(): void
     {
-        $session_key = $this->config->get('session_key');
+        $this->logInfo('Starting authentication process.');
 
-        if (!isset($_SESSION["userlogin"]) || !isset($_SESSION["userpwd"])) {
-            $sessionEntity = new SessionEntity('', 'danger');
-            $this->authenticationService->auth($sessionEntity);
+        // Get the client IP using the IpAddressRetriever
+        $ipRetriever = new IpAddressRetriever($this->serverParams);
+        $ipAddress = $ipRetriever->getClientIp() ?: '0.0.0.0';
+        $username = $_SESSION["userlogin"] ?? '';
+
+        if ($this->loginAttemptService->isAccountLocked($username, $ipAddress)) {
+            $this->logWarning('Account is locked for user {username}', ['username' => $username]);
+            $sessionEntity = new SessionEntity(_('Account is temporarily locked. Please try again later.'), 'danger');
+            $this->authService->auth($sessionEntity);
             return;
         }
 
-        $passwordEncryptionService = new PasswordEncryptionService($session_key);
-        $session_pass = $passwordEncryptionService->decrypt($_SESSION['userpwd']);
+        $sessionKey = $this->configManager->get('security', 'session_key');
 
-        $stmt = $this->db->prepare("SELECT id, fullname, password, active FROM users WHERE username=:username AND use_ldap=0");
-        $stmt->bindParam(':username', $_SESSION["userlogin"]);
+        if (!isset($_SESSION["userlogin"]) || !isset($_SESSION["userpwd"])) {
+            $this->logWarning('Session variables userlogin or userpwd are not set.');
+
+            $sessionEntity = new SessionEntity('', 'danger');
+            $this->authService->auth($sessionEntity);
+
+            $this->logInfo('Authentication process ended due to missing session variables.');
+            return;
+        }
+
+        $encryptionService = new PasswordEncryptionService($sessionKey);
+        $sessionPassword = $encryptionService->decrypt($_SESSION['userpwd']);
+
+        $stmt = $this->connection->prepare("SELECT id, fullname, password, active, email FROM users WHERE username=:username AND use_ldap=0");
+        $stmt->bindValue(':username', $_SESSION["userlogin"], PDO::PARAM_STR);
         $stmt->execute();
         $rowObj = $stmt->fetch(PDO::FETCH_ASSOC);
 
         if (!$rowObj) {
+            $this->logWarning('No user found with the provided username: {username}', ['username' => $_SESSION["userlogin"]]);
             $this->handleFailedAuthentication();
+
+            $this->logInfo('Authentication process ended due to no user found.');
             return;
         }
 
-        $config = new AppConfiguration();
-        $userAuthService = new UserAuthenticationService(
-            $config->get('password_encryption'),
-            $config->get('password_encryption_cost')
-        );
+        $passwordEncryption = $this->configManager->get('security', 'password_encryption', 'bcrypt');
+        $passwordCost = $this->configManager->get('security', 'password_cost', 12);
 
-        if (!$userAuthService->verifyPassword($session_pass, $rowObj['password'])) {
+        $userAuthService = new UserAuthenticationService($passwordEncryption, $passwordCost);
+
+        if (!$userAuthService->verifyPassword($sessionPassword, $rowObj['password'])) {
+            $this->logWarning('Password verification failed for user {username}', ['username' => $_SESSION["userlogin"]]);
+            $this->loginAttemptService->recordAttempt($username, $ipAddress, false);
             $this->handleFailedAuthentication();
+
+            $this->logInfo('Authentication process ended due to password verification failure.');
             return;
         }
 
         if ($rowObj['active'] != 1) {
+            $this->logWarning('User account is disabled for user {username}', ['username' => $_SESSION["userlogin"]]);
             $sessionEntity = new SessionEntity(_('The user account is disabled.'), 'danger');
-            $this->authenticationService->auth($sessionEntity);
+            $this->authService->auth($sessionEntity);
+
+            $this->logInfo('Authentication process ended due to disabled user account.');
             return;
         }
 
         if ($userAuthService->requiresRehash($rowObj['password'])) {
-            UserManager::update_user_password($this->db, $rowObj["id"], $session_pass);
+            $this->logInfo('Password requires rehashing for user {username}', ['username' => $_SESSION["userlogin"]]);
+            UserManager::updateUserPassword($this->connection, $rowObj["id"], $sessionPassword);
         }
 
         session_regenerate_id(true);
+        $this->logInfo('Session ID regenerated for user {username}', ['username' => $_SESSION["userlogin"]]);
 
-        $_SESSION['userid'] = $rowObj['id'];
-        $_SESSION['name'] = $rowObj['fullname'];
-        $_SESSION['auth_used'] = 'internal';
+        $this->csrfTokenService->ensureTokenExists();
+        $this->logInfo('CSRF token ensured for user {username}', ['username' => $_SESSION["userlogin"]]);
 
-        if (!isset($_SESSION['csrf_token'])) {
-            $_SESSION['csrf_token'] = $this->csrfTokenService->generateToken();
+        // Check if MFA is globally enabled
+        $mfaGloballyEnabled = $this->configManager->get('security', 'mfa.enabled', false);
+
+        // Check if MFA is enabled for this user
+        $mfaRequired = $mfaGloballyEnabled && $this->mfaService->isMfaEnabled($rowObj['id']);
+
+        if ($mfaRequired) {
+            $this->logInfo('MFA is required for user {username}', ['username' => $_SESSION["userlogin"]]);
+
+            // Store user details temporarily for MFA verification - DO NOT set userid yet!
+            $_SESSION['pending_userid'] = $rowObj['id'];
+            $_SESSION['pending_name'] = $rowObj['fullname'];
+            $_SESSION['pending_email'] = $rowObj['email'];
+            $_SESSION['pending_auth_used'] = 'internal';
+
+            // Use our centralized MFA session manager to set MFA required
+            MfaSessionManager::setMfaRequired($rowObj['id']);
+
+            if (isset($_POST['authenticate'])) {
+                $this->loginAttemptService->recordAttempt($username, $ipAddress, true);
+                $this->userEventLogger->logSuccessfulAuth();
+
+                // Log before redirect
+                $this->logInfo('SqlAuthenticator: Redirecting to MFA verification page');
+
+                // Clear any output buffers
+                if (ob_get_level()) {
+                    ob_end_clean();
+                }
+
+                // Build redirect URL with base_url_prefix support for subfolder deployments
+                $baseUrlPrefix = $this->configManager->get('interface', 'base_url_prefix', '');
+                $redirectUrl = $baseUrlPrefix . '/mfa/verify';
+                header("Location: $redirectUrl", true, 302);
+                exit;
+            }
+        } else {
+            // No MFA required, proceed with full authentication
+            // NOW it's safe to set userid since MFA is not required
+            $_SESSION['userid'] = $rowObj['id'];
+            $_SESSION['name'] = $rowObj['fullname'];
+            $_SESSION['email'] = $rowObj['email'];
+            $_SESSION['auth_used'] = 'internal';
+            $_SESSION['authenticated'] = true;
+            $_SESSION['mfa_required'] = false;
+
+            if (isset($_POST['authenticate'])) {
+                $this->loginAttemptService->recordAttempt($username, $ipAddress, true);
+                $this->userEventLogger->logSuccessfulAuth();
+                session_write_close();
+                $this->authService->redirectToIndex();
+            }
         }
 
-        if (isset($_POST['authenticate'])) {
-            $this->userEventLogger->log_successful_auth();
-            session_write_close();
-            $this->authenticationService->redirectToIndex();
-        }
+        $this->logInfo('Authentication process completed successfully for user {username}', ['username' => $_SESSION["userlogin"]]);
     }
 
     private function handleFailedAuthentication(): void
     {
+        $this->logInfo('Handling failed authentication.');
+
         if (isset($_POST['authenticate'])) {
-            $this->userEventLogger->log_failed_auth();
+            $this->userEventLogger->logFailedAuth();
             $sessionEntity = new SessionEntity(_('Authentication failed!'), 'danger');
         } else {
             unset($_SESSION["userpwd"]);
             unset($_SESSION["userlogin"]);
             $sessionEntity = new SessionEntity(_('Session expired, please login again.'), 'danger');
         }
-        $this->authenticationService->auth($sessionEntity);
+        $this->authService->auth($sessionEntity);
+
+        $this->logInfo('Failed authentication handled.');
     }
 }

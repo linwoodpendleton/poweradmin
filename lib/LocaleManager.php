@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -22,21 +22,50 @@
 
 namespace Poweradmin;
 
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
+
+/**
+ * Class LocaleManager
+ * Manages locale settings for the application.
+ */
 class LocaleManager
 {
+    /**
+     * @var array $supportedLocales List of supported locales.
+     */
     private array $supportedLocales;
+
+    /**
+     * @var string $localeDirectory Directory where locale files are stored.
+     */
     private string $localeDirectory;
 
-    public function __construct(array $supportedLocales, string $localeDirectory)
+    private LoggerInterface $logger;
+
+    /**
+     * LocaleManager constructor.
+     *
+     * @param array $supportedLocales List of supported locales.
+     * @param string $localeDirectory Directory where locale files are stored.
+     */
+    public function __construct(array $supportedLocales, string $localeDirectory, ?LoggerInterface $logger = null)
     {
         $this->supportedLocales = $supportedLocales;
         $this->localeDirectory = $localeDirectory;
+        $this->logger = $logger ?? new NullLogger();
     }
 
+    /**
+     * Sets the locale for the application.
+     *
+     * @param string $locale The locale to set.
+     * @return void
+     */
     public function setLocale(string $locale): void
     {
         if (!in_array($locale, $this->supportedLocales)) {
-            error_log("The provided locale '{$locale}' is not supported. Please choose a supported locale.");
+            $this->logger->warning('The provided locale {locale} is not supported. Please choose a supported locale.', ['locale' => $locale]);
             return;
         }
 
@@ -44,26 +73,22 @@ class LocaleManager
             return;
         }
 
-        $locales = [
-            $locale . '.UTF-8',
-            $locale . '.utf8',
-            $locale,
-        ];
+        if (!is_dir($this->localeDirectory) || !is_readable($this->localeDirectory)) {
+            $this->logger->warning('The locale directory {dir} does not exist or is not readable.', ['dir' => $this->localeDirectory]);
+            return;
+        }
+
+        $locales = ["$locale.UTF-8", "$locale.utf8", $locale];
 
         if (!setlocale(LC_ALL, $locales)) {
-            error_log("Failed to set locale '{$locale}'. Selected locale may be unsupported on this system.");
+            $this->logger->warning('Failed to set locale {locale}. Selected locale may be unsupported on this system. Tried: {tried}', ['locale' => $locale, 'tried' => implode(', ', $locales)]);
             return;
         }
 
-        if (!is_dir($this->localeDirectory) || !is_readable($this->localeDirectory)) {
-            error_log("The directory '{$this->localeDirectory}' does not exist or is not readable.");
-            return;
-        }
-
-        $gettext_domain = 'messages';
-        bindtextdomain($gettext_domain, $this->localeDirectory);
-        bind_textdomain_codeset($gettext_domain, 'utf-8');
-        textdomain($gettext_domain);
+        $domain = 'messages';
+        bindtextdomain($domain, $this->localeDirectory);
+        bind_textdomain_codeset($domain, 'utf-8');
+        textdomain($domain);
         @putenv('LANG=' . $locale);
         @putenv('LANGUAGE=' . $locale);
     }

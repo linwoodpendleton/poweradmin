@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -23,18 +23,29 @@
 namespace Poweradmin\Infrastructure\Api;
 
 use Poweradmin\Domain\Error\ApiErrorException;
+use Poweradmin\Infrastructure\Configuration\ConfigurationManager;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
+use Throwable;
 
-class HttpClient implements ApiClient {
+class HttpClient implements ApiClient
+{
 
     private string $apiUrl;
     private string $apiKey;
+    private int $timeout;
+    private LoggerInterface $logger;
 
-    public function __construct(string $baseEndpoint, string $apiKey) {
+    public function __construct(string $baseEndpoint, string $apiKey, ?LoggerInterface $logger = null, int $timeout = 10)
+    {
         $this->apiUrl = rtrim($baseEndpoint, '/');
         $this->apiKey = $apiKey;
+        $this->timeout = $timeout > 0 ? $timeout : 10;
+        $this->logger = $logger ?? new NullLogger();
     }
 
-    public function makeRequest(string $method, string $endpoint, array $data = []): array {
+    public function makeRequest(string $method, string $endpoint, array $data = []): array
+    {
         $url = $this->apiUrl . $endpoint;
         $options = [
             'http' => [
@@ -42,6 +53,7 @@ class HttpClient implements ApiClient {
                     "X-API-Key: $this->apiKey\r\n",
                 'method' => strtoupper($method),
                 'ignore_errors' => true,
+                'timeout' => $this->timeout,
             ]
         ];
 
@@ -49,28 +61,286 @@ class HttpClient implements ApiClient {
             $options['http']['content'] = json_encode($data);
         }
 
-        $context = stream_context_create($options);
-        $response = @file_get_contents($url, false, $context);
-
-        $responseCode = $this->getResponseCode($http_response_header);
-        $responseData = json_decode($response, true);
-
-        if ($responseCode >= 400) {
-            throw new ApiErrorException($responseData['error'] ?? 'An unknown API error occurred');
+        // Retry once on transient failures (5xx, timeout, connection refused) for
+        // idempotent GET requests. Non-GET methods are not retried to avoid
+        // accidentally duplicating side effects.
+        $maxAttempts = strtoupper($method) === 'GET' ? 2 : 1;
+        for ($attempt = 1;; $attempt++) {
+            try {
+                return $this->performSingleRequest($url, $method, $options);
+            } catch (ApiErrorException $e) {
+                if ($attempt < $maxAttempts && $this->isTransient($e)) {
+                    $this->logger->debug('Transient API error on attempt {attempt}/{max}, retrying: {error}', [
+                        'attempt' => $attempt,
+                        'max' => $maxAttempts,
+                        'error' => $e->getMessage(),
+                    ]);
+                    usleep(200000); // 200ms
+                    continue;
+                }
+                throw $e;
+            }
         }
-
-        return [
-            'responseCode' => $responseCode,
-            'data' => $responseData
-        ];
     }
 
-    private function getResponseCode(array $headers): ?int {
+    private function isTransient(ApiErrorException $e): bool
+    {
+        $code = $e->getCode();
+        if (in_array($code, [500, 502, 503, 504], true)) {
+            return true;
+        }
+        if ($code === 0) {
+            $marker = strtolower((string) $e->getDetail('error', $e->getMessage()));
+            foreach (['timed out', 'timeout', 'connection refused', 'could not resolve', 'network is unreachable', 'unreachable'] as $needle) {
+                if (strpos($marker, $needle) !== false) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private function performSingleRequest(string $url, string $method, array $options): array
+    {
+        try {
+            $context = stream_context_create($options);
+            $response = @file_get_contents($url, false, $context);
+
+            if ($response === false) {
+                $error = error_get_last();
+                $displayErrors = $this->shouldDisplayErrors();
+
+                $errorDetails = [
+                    'url' => $url,
+                    'method' => $method,
+                    'error' => $error['message'] ?? 'Unknown error',
+                    'code' => $error['type'] ?? 0
+                ];
+
+                // Detect common misconfigurations and provide helpful error messages
+                $errorMessage = $this->getHelpfulErrorMessage($errorDetails['error'], $url, $displayErrors);
+
+                $this->logApiError($errorMessage, $errorDetails);
+                throw new ApiErrorException($errorMessage, 0, null, $errorDetails);
+            }
+
+            $responseCode = $this->getResponseCode($http_response_header);
+
+            // For 204 No Content responses, don't try to parse JSON
+            if ($responseCode === 204) {
+                $responseData = []; // Empty array for 204 No Content
+            } else {
+                $responseData = json_decode($response, true);
+                $jsonError = json_last_error();
+
+                // Handle HTTP error responses (4xx, 5xx) before strict JSON validation
+                // PowerDNS may return plain text errors (e.g., "Not Found" for 404)
+                if ($responseCode >= 400) {
+                    $displayErrors = $this->shouldDisplayErrors();
+
+                    // For error responses, use parsed JSON if available, otherwise use raw response
+                    $errorResponse = ($jsonError === JSON_ERROR_NONE && $responseData !== null)
+                        ? $responseData
+                        : ['raw_response' => substr($response, 0, 255)];
+
+                    $errorDetails = [
+                        'url' => $url,
+                        'method' => $method,
+                        'http_code' => $responseCode,
+                        'response' => $errorResponse
+                    ];
+
+                    $this->logger->debug('HTTP error {code} for {method} {url}', [
+                        'code' => $responseCode, 'method' => $method, 'url' => $url,
+                        'response_body' => substr($response, 0, 500),
+                    ]);
+
+                    // Provide user-friendly messages for common HTTP errors
+                    $errorMessage = $this->getHttpErrorMessage($responseCode, $errorResponse, $displayErrors);
+
+                    // Don't log 404 errors as they are often expected (e.g., checking if zone exists)
+                    if ($responseCode !== 404) {
+                        $this->logApiError($errorMessage, $errorDetails);
+                    }
+                    throw new ApiErrorException($errorMessage, $responseCode, null, $errorDetails);
+                }
+
+                // For success responses, require valid JSON
+                if ($jsonError !== JSON_ERROR_NONE && !empty($response)) {
+                    $errorMessage = 'Invalid JSON response from API';
+                    $errorDetails = [
+                        'url' => $url,
+                        'method' => $method,
+                        'response' => substr($response, 0, 255), // Limit response size for logging
+                        'json_error' => json_last_error_msg()
+                    ];
+
+                    $this->logApiError($errorMessage, $errorDetails);
+                    throw new ApiErrorException($errorMessage, 0, null, $errorDetails);
+                }
+            }
+
+            return [
+                'responseCode' => $responseCode,
+                'data' => $responseData
+            ];
+        } catch (ApiErrorException $e) {
+            // Re-throw API exceptions
+            throw $e;
+        } catch (Throwable $e) {
+            // Catch any other exceptions and convert to ApiErrorException
+            $errorDetails = [
+                'url' => $url,
+                'method' => $method,
+                'exception' => get_class($e),
+                'message' => $e->getMessage(),
+                'code' => $e->getCode(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine()
+            ];
+
+            $errorMessage = $this->shouldDisplayErrors()
+                ? sprintf('API request error: %s', $e->getMessage())
+                : 'An unexpected error occurred when connecting to the API';
+
+            $this->logApiError($errorMessage, $errorDetails);
+            throw new ApiErrorException($errorMessage, 0, $e, $errorDetails);
+        }
+    }
+
+    /**
+     * Log API errors for debugging
+     *
+     * @param string $message Error message
+     * @param array $details Additional error details for logging
+     * @return void
+     */
+    private function logApiError(string $message, array $details = []): void
+    {
+        $this->logger->error('API Error: {message}', ['message' => $message, 'details' => $details]);
+    }
+
+    private function getResponseCode(array $headers): ?int
+    {
         if (isset($headers[0])) {
             preg_match('/\s(\d{3})\s/', $headers[0], $match);
             return isset($match[1]) ? (int)$match[1] : null;
         }
 
         return null;
+    }
+
+    private function shouldDisplayErrors(): bool
+    {
+        $configManager = ConfigurationManager::getInstance();
+        return (bool)$configManager->get('misc', 'display_errors');
+    }
+
+    /**
+     * Generate user-friendly error messages for HTTP error responses
+     *
+     * @param int $responseCode HTTP response code
+     * @param array $errorResponse Parsed error response or raw response
+     * @param bool $displayErrors Whether to display detailed errors
+     * @return string User-friendly error message
+     */
+    private function getHttpErrorMessage(int $responseCode, array $errorResponse, bool $displayErrors): string
+    {
+        // Try to get error message from JSON response
+        $apiError = $errorResponse['error'] ?? null;
+
+        // For raw text responses (e.g., "Not Found")
+        $rawResponse = $errorResponse['raw_response'] ?? null;
+
+        // Common HTTP error codes with user-friendly messages
+        $httpErrors = [
+            400 => 'Bad Request',
+            401 => 'Unauthorized - check API key configuration',
+            403 => 'Forbidden - API key may lack required permissions',
+            404 => 'Resource not found',
+            405 => 'Method not allowed',
+            500 => 'Internal Server Error',
+            502 => 'Bad Gateway',
+            503 => 'Service Unavailable',
+        ];
+
+        $statusText = $httpErrors[$responseCode] ?? 'Unknown error';
+
+        if ($displayErrors) {
+            if ($apiError) {
+                return sprintf('HTTP Error %d: %s', $responseCode, $apiError);
+            } elseif ($rawResponse) {
+                return sprintf('HTTP Error %d: %s', $responseCode, $rawResponse);
+            }
+            return sprintf('HTTP Error %d: %s', $responseCode, $statusText);
+        }
+
+        return 'An API request failed';
+    }
+
+    /**
+     * Generate helpful error messages for common misconfigurations
+     *
+     * @param string $originalError The original error message
+     * @param string $url The URL that failed
+     * @param bool $displayErrors Whether to display detailed errors
+     * @return string Helpful error message
+     */
+    private function getHelpfulErrorMessage(string $originalError, string $url, bool $displayErrors): string
+    {
+        // Check for "No such file or directory" - indicates missing protocol prefix
+        if (strpos($originalError, 'No such file or directory') !== false) {
+            if ($displayErrors) {
+                return sprintf(
+                    'PowerDNS API connection failed: URL "%s" is being treated as a file path. ' .
+                    'Make sure the API URL starts with http:// or https:// (e.g., http://127.0.0.1:8081). ' .
+                    'Also verify the port number is correct (PowerDNS API typically runs on port 8081).',
+                    $url
+                );
+            }
+            return 'PowerDNS API configuration error: Invalid API URL format. Check that URL starts with http:// or https://';
+        }
+
+        // Check for connection refused
+        if (strpos($originalError, 'Connection refused') !== false || strpos($originalError, 'Failed to connect') !== false) {
+            if ($displayErrors) {
+                return sprintf(
+                    'PowerDNS API connection refused at "%s". ' .
+                    'Please verify: (1) PowerDNS API is running, (2) API port is correct (typically 8081), ' .
+                    '(3) Firewall allows the connection.',
+                    $url
+                );
+            }
+            return 'Cannot connect to PowerDNS API. Verify the API is running and accessible.';
+        }
+
+        // Check for timeout
+        if (strpos($originalError, 'timed out') !== false || strpos($originalError, 'timeout') !== false) {
+            if ($displayErrors) {
+                return sprintf(
+                    'PowerDNS API request timed out at "%s". ' .
+                    'The API server may be slow to respond or unreachable.',
+                    $url
+                );
+            }
+            return 'PowerDNS API request timed out. Check API server availability.';
+        }
+
+        // Check for name resolution failures
+        if (strpos($originalError, 'resolve') !== false || strpos($originalError, 'Name or service not known') !== false) {
+            if ($displayErrors) {
+                return sprintf(
+                    'Cannot resolve hostname in PowerDNS API URL "%s". ' .
+                    'Check that the hostname is correct and DNS is working.',
+                    $url
+                );
+            }
+            return 'Cannot resolve PowerDNS API hostname. Check the URL configuration.';
+        }
+
+        // Default error message
+        return $displayErrors
+            ? sprintf('API request failed: %s', $originalError)
+            : 'An unknown API error occurred';
     }
 }

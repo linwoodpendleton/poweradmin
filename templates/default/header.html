@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ iface_title }}</title>
+    <!-- CSS only -->
+    <link href="{{ base_url_prefix }}/vendor/twbs/bootstrap/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="{{ base_url_prefix }}/vendor/twbs/bootstrap-icons/font/bootstrap-icons.css">
+    <script>
+        // Global configuration for subfolder deployment
+        window.BASE_URL_PREFIX = '{{ base_url_prefix }}';
+
+        // Determine correct theme before loading stylesheets to prevent FOUC
+        const savedTheme = localStorage.getItem('style');
+        const serverTheme = '{{ iface_style }}';
+        const correctTheme = (savedTheme === 'light' || savedTheme === 'dark') ? savedTheme : serverTheme;
+        
+        // Load the correct stylesheet immediately
+        document.write('<link id="theme-stylesheet" rel="stylesheet" href="{{ base_url_prefix }}/{{ theme_base_path }}/{{ theme }}/style/' + correctTheme + '.css?time={{ file_version }}" type="text/css">');
+        {% if custom_theme_exists %}
+        document.write('<link id="custom-theme-stylesheet" rel="stylesheet" href="{{ base_url_prefix }}/{{ theme_base_path }}/{{ theme }}/style/custom_' + correctTheme + '.css?time={{ file_version }}" type="text/css">');
+        {% endif %}
+    </script>
+    <script type="text/javascript" src="{{ base_url_prefix }}/assets/helper.js?time={{ file_version }}"></script>
+    <script type="text/javascript" src="{{ base_url_prefix }}/assets/userSettings.js?time={{ file_version }}"></script>
+</head>
+<body>
+
+{% if current_page == 'mfa_verify' %}
+<!-- MFA Verification - Simplified header with no navigation -->
+<header class="mb-4">
+    <div class="container">
+        <div class="d-flex flex-wrap align-items-center justify-content-start">
+            <a class="py-4 d-flex align-items-center my-2 my-lg-0 me-lg-auto text-decoration-none">
+                <img class="me-2" src="{{ base_url_prefix }}/assets/logo.png" height="32">
+                <span class="fs-4">{{ iface_title }}</span>
+            </a>
+            <!-- No navigation menu intentionally -->
+        </div>
+    </div>
+</header>
+{% else %}
+<!-- Regular header with navigation -->
+<header class="mb-4">
+    <div class="container">
+        <div class="d-flex flex-wrap align-items-center justify-content-center justify-content-lg-start">
+            <a class="py-4 d-flex align-items-center my-2 my-lg-0 me-lg-auto text-decoration-none"
+               href="{{ base_url_prefix }}/">
+                {% if custom_header %}
+                {% include ('custom/header.html') %}
+                {% else %}
+                <img class="me-2" src="{{ base_url_prefix }}/assets/logo.png" height="32">
+                <span class="fs-4">{{ iface_title }}</span>
+                {% endif %}
+            </a>
+
+            {% if not user_logged_in and current_page == 'login' and show_language_selector is defined and show_language_selector and locales is defined %}
+            <div class="dropdown">
+                <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" id="langSwitcher" data-bs-toggle="dropdown" aria-expanded="false">
+                    <i class="bi bi-globe me-1"></i><span id="currentLangLabel">{% for loc in locales %}{% if loc.selected %}{{ loc.language }}{% endif %}{% endfor %}</span>
+                </button>
+                <ul class="dropdown-menu dropdown-menu-end" style="max-height: 300px; overflow-y: auto;">
+                    {% for loc in locales %}
+                    <li>
+                        <a class="dropdown-item small {% if loc.selected %}active{% endif %}" href="#"
+                           data-lang="{{ loc.locale }}" data-label="{{ loc.language }}">
+                            {{ loc.language }}
+                        </a>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </div>
+            <script>
+            (function() {
+                document.querySelectorAll('#langSwitcher + .dropdown-menu .dropdown-item').forEach(function(item) {
+                    item.addEventListener('click', function(e) {
+                        e.preventDefault();
+                        var lang = this.dataset.lang;
+                        localStorage.setItem('poweradmin_language', lang);
+                        window.location.href = '{{ base_url_prefix }}/login?lang=' + lang;
+                    });
+                });
+            })();
+            </script>
+            {% endif %}
+
+            <ul class="nav col-12 col-lg-auto my-2 justify-content-center my-md-0 text-small">
+                {% if user_logged_in %}
+                {% if perm_search %}
+                <li class="p-2">
+                    <a href="{{ base_url_prefix }}/search" class="nav-link text-{{ current_page == 'search' ? 'primary' : 'secondary' }}"><i class="bi bi-search fs-5"></i></a>
+                    <a href="{{ base_url_prefix }}/search" class="text-{{ current_page == 'search' ? 'primary' : 'secondary' }} text-decoration-none">{% trans %}Search{% endtrans %}</a>
+                </li>
+                {% endif %}
+                {% if perm_view_zone_own or perm_view_zone_other or perm_zone_master_add or perm_zone_slave_add %}
+                <li class="p-2">
+                    <a href="{{ base_url_prefix }}/zones/forward" class="nav-link text-{{ current_page in ['list_forward_zones', 'list_reverse_zones', 'add_zone_master', 'add_zone_slave', 'bulk_registration', 'batch_ptr_record', 'list_log_zones', 'edit'] or current_page starts with 'module_dns_wizard' ? 'primary' : 'secondary' }}" data-testid="list-zones-link"><i class="bi bi-diagram-3 fs-5"></i></a>
+                    <a class="text-{{ current_page in ['list_forward_zones', 'list_reverse_zones', 'add_zone_master', 'add_zone_slave', 'bulk_registration', 'batch_ptr_record', 'list_log_zones', 'edit'] or current_page starts with 'module_dns_wizard' ? 'primary' : 'secondary' }} text-decoration-none dropdown-toggle" data-bs-toggle="dropdown"
+                       href="#"
+                       role="button">{% trans %}Zones{% endtrans %}</a>
+                    <ul class="dropdown-menu">
+                        {% if perm_view_zone_own or perm_view_zone_other %}
+                        <li><a class="dropdown-item {{ current_page == 'list_forward_zones' ? 'active' : '' }}" href="{{ base_url_prefix }}/zones/forward" data-testid="list-forward-zones-link"><i class="bi bi-arrow-right-circle me-2"></i>{% trans %}Forward zones{% endtrans %}</a></li>
+                        <li><a class="dropdown-item {{ current_page == 'list_reverse_zones' ? 'active' : '' }}" href="{{ base_url_prefix }}/zones/reverse" data-testid="list-reverse-zones-link"><i class="bi bi-arrow-left-circle me-2"></i>{% trans %}Reverse zones{% endtrans %}</a></li>
+                        <li><hr class="dropdown-divider"></li>
+                        {% endif %}
+                        {% if perm_zone_master_add %}
+                        <li><a class="dropdown-item {{ current_page == 'add_zone_master' ? 'active' : '' }}"
+                               href="{{ base_url_prefix }}/zones/add/master" data-testid="add-master-zone-link"><i class="bi bi-plus-circle me-2"></i>{% trans %}Add master zone{% endtrans %}</a></li>
+                        {% endif %}
+                        {% if perm_zone_slave_add %}
+                        <li><a class="dropdown-item {{ current_page == 'add_zone_slave' ? 'active' : '' }}"
+                               href="{{ base_url_prefix }}/zones/add/slave"><i class="bi bi-plus-circle-dotted me-2"></i>{% trans %}Add slave zone{% endtrans %}</a></li>
+                        {% endif %}
+                        {% if perm_zone_master_add %}
+                        <li><a class="dropdown-item {{ current_page == 'bulk_registration' ? 'active' : '' }}"
+                               href="{{ base_url_prefix }}/zones/bulk-registration"><i class="bi bi-collection me-2"></i>{% trans %}Bulk registration{% endtrans %}</a>
+                        </li>
+                        {% endif %}
+                        {% if iface_add_reverse_record and (perm_view_zone_own or perm_view_zone_other) %}
+                        <li><a class="dropdown-item {{ current_page == 'batch_ptr_record' ? 'active' : '' }}"
+                               href="{{ base_url_prefix }}/zones/batch-ptr"><i class="bi bi-arrow-repeat me-2"></i>{% trans %}Batch PTR Records{% endtrans %}</a>
+                        </li>
+                        {% endif %}
+                        {% if (perm_is_godlike or perm_view_zone_own or perm_view_zone_other) and dblog_use == true %}
+                        {% if perm_is_godlike %}
+                        <li>
+                            <hr class="dropdown-divider">
+                        </li>
+                        {% endif %}
+                        <li><a class="dropdown-item {{ current_page == 'list_log_zones' ? 'active' : '' }}" href="{{ base_url_prefix }}/zones/logs"><i class="bi bi-journal-text me-2"></i>{% trans %}Zone logs{% endtrans %}</a></li>
+                        {% endif %}
+                    </ul>
+                </li>
+                {% endif %}
+                {% if perm_view_others or perm_edit_others or perm_add_new or perm_is_godlike %}
+                <li class="p-2">
+                    <a href="{{ base_url_prefix }}/users" class="nav-link text-{{ current_page in ['users', 'add_user', 'list_log_users'] or (current_page == 'edit_user' and request.id != session_userid) ? 'primary' : 'secondary' }}"><i class="bi bi-people fs-5"></i></a>
+                    <a class="text-{{ current_page in ['users', 'add_user', 'list_log_users'] or (current_page == 'edit_user' and request.id != session_userid) ? 'primary' : 'secondary' }} text-decoration-none dropdown-toggle" data-bs-toggle="dropdown"
+                       href="#"
+                       role="button">{% trans %}Users{% endtrans %}</a>
+                    <ul class="dropdown-menu">
+                        <li><a class="dropdown-item {{ current_page == 'users' ? 'active' : '' }}" href="{{ base_url_prefix }}/users"><i class="bi bi-person-gear me-2"></i>{% trans %}List users{% endtrans %}</a></li>
+                        {% if perm_add_new %}
+                        <li><a class="dropdown-item {{ current_page == 'add_user' ? 'active' : '' }}" href="{{ base_url_prefix }}/users/add"><i class="bi bi-person-plus me-2"></i>{% trans %}Add user{% endtrans %}</a></li>
+                        {% endif %}
+                        {% if perm_is_godlike and dblog_use == true %}
+                        <li>
+                            <hr class="dropdown-divider">
+                        </li>
+                        <li><a class="dropdown-item {{ current_page == 'list_log_users' ? 'active' : '' }}"
+                               href="{{ base_url_prefix }}/users/logs"><i class="bi bi-journal-text me-2"></i>{% trans %}User logs{% endtrans %}</a></li>
+                        {% endif %}
+                    </ul>
+                </li>
+                {% endif %}
+                {% if perm_is_godlike and show_group_access_templates %}
+                <li class="p-2">
+                    <a href="{{ base_url_prefix }}/groups" class="nav-link text-{{ current_page in ['list_groups', 'add_group', 'edit_group', 'manage_group_members', 'manage_group_zones', 'list_log_groups'] ? 'primary' : 'secondary' }}"><i class="bi bi-people-fill fs-5"></i></a>
+                    <a class="text-{{ current_page in ['list_groups', 'add_group', 'edit_group', 'manage_group_members', 'manage_group_zones', 'list_log_groups'] ? 'primary' : 'secondary' }} text-decoration-none dropdown-toggle" data-bs-toggle="dropdown"
+                       href="#"
+                       role="button">{% trans %}Groups{% endtrans %}</a>
+                    <ul class="dropdown-menu">
+                        <li><a class="dropdown-item {{ current_page == 'list_groups' ? 'active' : '' }}" href="{{ base_url_prefix }}/groups"><i class="bi bi-collection-fill me-2"></i>{% trans %}List groups{% endtrans %}</a></li>
+                        <li><a class="dropdown-item {{ current_page == 'add_group' ? 'active' : '' }}" href="{{ base_url_prefix }}/groups/add"><i class="bi bi-plus-circle me-2"></i>{% trans %}Add group{% endtrans %}</a></li>
+                        {% if dblog_use == true %}
+                        <li>
+                            <hr class="dropdown-divider">
+                        </li>
+                        <li><a class="dropdown-item {{ current_page == 'list_log_groups' ? 'active' : '' }}"
+                               href="{{ base_url_prefix }}/groups/logs"><i class="bi bi-journal-text me-2"></i>{% trans %}Group logs{% endtrans %}</a></li>
+                        {% endif %}
+                    </ul>
+                </li>
+                {% endif %}
+                {% if perm_templ_perm_edit %}
+                <li class="p-2">
+                    <a href="{{ base_url_prefix }}/permissions/templates" class="nav-link text-{{ current_page in ['list_perm_templ', 'add_perm_templ', 'edit_perm_templ'] ? 'primary' : 'secondary' }} text-center"><i class="bi bi-shield-lock fs-5"></i></a>
+                    <a class="text-{{ current_page in ['list_perm_templ', 'add_perm_templ', 'edit_perm_templ'] ? 'primary' : 'secondary' }} text-decoration-none dropdown-toggle" data-bs-toggle="dropdown"
+                       href="#"
+                       role="button">{% if show_user_access_templates %}{% trans %}Access{% endtrans %}{% else %}{% trans %}Templates{% endtrans %}{% endif %}</a>
+                    <ul class="dropdown-menu">
+                        <li><a class="dropdown-item {{ current_page == 'list_perm_templ' ? 'active' : '' }}"
+                               href="{{ base_url_prefix }}/permissions/templates"><i class="bi bi-shield-fill-check me-2"></i>{% trans %}List templates{% endtrans %}</a></li>
+                        {% if perm_templ_perm_add %}
+                        <li><a class="dropdown-item {{ current_page == 'add_perm_templ' ? 'active' : '' }}"
+                               href="{{ base_url_prefix }}/permissions/templates/add"><i class="bi bi-shield-plus me-2"></i>{% trans %}Add template{% endtrans %}</a></li>
+                        {% endif %}
+                    </ul>
+                </li>
+                {% endif %}
+                {% if perm_zone_templ_add or perm_zone_templ_edit %}
+                <li class="p-2">
+                    <a href="{{ base_url_prefix }}/zones/templates" class="nav-link text-{{ current_page in ['list_zone_templ', 'add_zone_templ', 'edit_zone_templ', 'list_template_zones'] ? 'primary' : 'secondary' }} text-center"><i
+                            class="bi bi-files fs-5"></i></a>
+                    <a class="text-{{ current_page in ['list_zone_templ', 'add_zone_templ', 'edit_zone_templ', 'list_template_zones'] ? 'primary' : 'secondary' }} text-decoration-none dropdown-toggle" data-bs-toggle="dropdown"
+                       href="#"
+                       role="button">{% trans %}Templates{% endtrans %}</a>
+                    <ul class="dropdown-menu">
+                        <li><a class="dropdown-item {{ current_page == 'list_zone_templ' ? 'active' : '' }}"
+                               href="{{ base_url_prefix }}/zones/templates"><i class="bi bi-files me-2"></i>{% trans %}List zone templates{% endtrans %}</a></li>
+                        {% if perm_zone_templ_add %}
+                        <li><a class="dropdown-item {{ current_page == 'add_zone_templ' ? 'active' : '' }}"
+                               href="{{ base_url_prefix }}/zones/templates/add"><i class="bi bi-file-plus me-2"></i>{% trans %}Add zone template{% endtrans %}</a></li>
+                        {% endif %}
+                    </ul>
+                </li>
+                {% endif %}
+                {% if ((perm_is_godlike or perm_api_manage_keys) and api_enabled) or (perm_is_godlike and enable_consistency_checks) or (module_nav_items is defined and module_nav_items|length > 0) %}
+                <li class="p-2">
+                    <a href="#" class="nav-link text-{{ current_page in ['api_keys', 'list_log_api', 'database_consistency'] or (current_page starts with 'module_' and not current_page starts with 'module_dns_wizard') ? 'primary' : 'secondary' }} text-center"><i class="bi bi-tools fs-5"></i></a>
+                    <a class="text-{{ current_page in ['api_keys', 'list_log_api', 'database_consistency'] or (current_page starts with 'module_' and not current_page starts with 'module_dns_wizard') ? 'primary' : 'secondary' }} text-decoration-none dropdown-toggle" data-bs-toggle="dropdown"
+                        href="#"
+                        role="button">{% trans %}Tools{% endtrans %}</a>
+                    <ul class="dropdown-menu">
+                        {% if (perm_is_godlike or perm_api_manage_keys) and api_enabled %}
+                        <li><a class="dropdown-item {{ current_page == 'api_keys' ? 'active' : '' }}" href="{{ base_url_prefix }}/settings/api-keys">
+                            <i class="bi bi-key-fill me-2"></i>{% trans %}API Keys{% endtrans %}
+                        </a></li>
+                        {% endif %}
+                        {% if perm_is_godlike and api_enabled and dblog_use == true %}
+                        <li><a class="dropdown-item {{ current_page == 'list_log_api' ? 'active' : '' }}" href="{{ base_url_prefix }}/settings/api/logs">
+                            <i class="bi bi-journal-text me-2"></i>{% trans %}API Logs{% endtrans %}
+                        </a></li>
+                        {% endif %}
+                        {% if api_docs_enabled %}
+                        <li><a class="dropdown-item" href="{{ base_url_prefix }}/api/docs" target="_blank">
+                            <i class="bi bi-book me-2"></i>{% trans %}API Documentation{% endtrans %}
+                        </a></li>
+                        {% endif %}
+                        {% if perm_is_godlike and enable_consistency_checks %}
+                        <li><a class="dropdown-item {{ current_page == 'database_consistency' ? 'active' : '' }}" href="{{ base_url_prefix }}/tools/database-consistency">
+                            <i class="bi bi-database-check me-2"></i>{% trans %}Database Consistency{% endtrans %}
+                        </a></li>
+                        {% endif %}
+                        {% if module_nav_items is defined and module_nav_items|length > 0 %}
+                        <li><hr class="dropdown-divider"></li>
+                        {% for item in module_nav_items %}
+                        <li><a class="dropdown-item {{ current_page == item.page_id ? 'active' : '' }}"
+                               href="{{ base_url_prefix }}{{ item.url }}">
+                            <i class="bi bi-{{ item.icon }} me-2"></i>{{ item.label|trans }}
+                        </a></li>
+                        {% endfor %}
+                        {% endif %}
+                    </ul>
+                </li>
+                {% endif %}
+                <li class="p-2">
+                    <a href="#" class="nav-link text-{{ current_page in ['change_password', 'mfa_setup', 'logout', 'user_preferences'] or (current_page == 'edit_user' and request.id == session_userid) ? 'primary' : 'secondary' }}">
+                        {% if user_avatar_url %}
+                            <img src="{{ user_avatar_url }}" alt="User Avatar" class="rounded-circle" width="30" height="30" style="object-fit: cover;">
+                        {% else %}
+                            <i class="bi bi-person-circle fs-5"></i>
+                        {% endif %}
+                    </a>
+                    <a class="text-{{ current_page in ['change_password', 'mfa_setup', 'logout', 'user_preferences'] or (current_page == 'edit_user' and request.id == session_userid) ? 'primary' : 'secondary' }} text-decoration-none dropdown-toggle" data-bs-toggle="dropdown"
+                       href="#"
+                       role="button">{% trans %}Account{% endtrans %}</a>
+                    <ul class="dropdown-menu">
+                        <li class="dropdown-header">
+                            <strong>{{ user_name }}</strong><br>
+                            <small class="text-muted">{{ user_username }}</small>
+                        </li>
+                        <li><hr class="dropdown-divider"></li>
+                        {% if perm_edit_own %}
+                        <li><a class="dropdown-item {{ current_page == 'edit_user' and request.id == session_userid ? 'active' : '' }}"
+                               href="{{ base_url_prefix }}/users/{{ session_userid }}/edit"><i class="bi bi-person-gear me-2"></i>{% trans %}Edit profile{% endtrans %}</a></li>
+                        {% endif %}
+                        <li><a class="dropdown-item {{ current_page == 'user_preferences' ? 'active' : '' }}"
+                               href="{{ base_url_prefix }}/user/preferences"><i class="bi bi-gear me-2"></i>{% trans %}Preferences{% endtrans %}</a></li>
+                        {% if can_change_password %}
+                        <li><a class="dropdown-item {{ current_page == 'change_password' ? 'active' : '' }}"
+                               href="{{ base_url_prefix }}/password/change"><i class="bi bi-key me-2"></i>{% trans %}Change password{% endtrans %}</a></li>
+                        {% endif %}
+                        {% if mfa_enabled %}
+                        <li><a class="dropdown-item {{ current_page == 'mfa_setup' ? 'active' : '' }}"
+                               href="{{ base_url_prefix }}/mfa/setup"><i class="bi bi-shield-check me-2"></i>{% trans %}Multi-Factor Authentication{% endtrans %}</a></li>
+                        {% endif %}
+                        <li><a class="dropdown-item {{ current_page == 'logout' ? 'active' : '' }}"
+                               href="{{ base_url_prefix }}/logout"><i class="bi bi-box-arrow-right me-2"></i>{% trans %}Logout{% endtrans %}</a></li>
+                    </ul>
+                </li>
+                {% endif %}
+            </ul>
+        </div>
+    </div>
+</header>
+{% endif %}
+
+{% if install_error %}
+<div class="container">
+    <div class="alert alert-danger bg-danger bg-opacity-10 py-2 border border-danger install-error small" role="alert">
+        <i class="bi bi-exclamation-triangle-fill me-2 text-danger"></i>
+        <strong class="text-danger">Error:</strong> <span class="text-danger">{{ install_error | raw }}</span>
+    </div>
+</div>
+{% endif %}
+
+{% if user_logged_in %}
+{% if session_key_error %}
+<div class="container">
+    <div data-testid="error-message" class="alert alert-danger bg-danger bg-opacity-10"><strong class="text-danger">Error:</strong> {{ session_key_error | raw }}</div>
+</div>
+{% endif %}
+{% endif %}
+
+<main class="container pb-3 flex-shrink-0">
+{% if system_messages is defined and system_messages %}
+    {% for message in system_messages %}
+    <div class="alert alert-{% if message.type == 'error' %}danger{% elseif message.type == 'warn' %}warning{% else %}{{ message.type }}{% endif %} bg-{% if message.type == 'error' %}danger{% elseif message.type == 'warn' %}warning{% else %}{{ message.type }}{% endif %} bg-opacity-10 py-2 border border-{% if message.type == 'error' %}danger{% elseif message.type == 'warn' %}warning{% else %}{{ message.type }}{% endif %} alert-dismissible small fade show" role="alert" data-testid="system-message">
+        <i class="bi bi-{% if message.type == 'error' %}exclamation-triangle{% elseif message.type == 'warn' %}exclamation-circle{% elseif message.type == 'success' %}check-circle{% else %}info-circle{% endif %}-fill me-2 text-{% if message.type == 'error' %}danger{% elseif message.type == 'warn' %}warning{% else %}{{ message.type }}{% endif %}"></i>
+        <strong class="text-{% if message.type == 'error' %}danger{% elseif message.type == 'warn' %}warning{% else %}{{ message.type }}{% endif %}">{% if message.type == 'error' %}Error:{% elseif message.type == 'warn' %}Warning:{% elseif message.type == 'success' %}Success:{% else %}Info:{% endif %}</strong> {{ message.content | raw }}
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+    </div>
+    {% endfor %}
+{% endif %}
+
+{% if api_error %}
+<div class="alert alert-warning alert-dismissible fade show py-2 mb-2" role="alert">
+    <i class="bi bi-exclamation-triangle me-2"></i>
+    <strong>{% trans %}PowerDNS API error{% endtrans %}{% if api_error.context.http_code %} (HTTP {{ api_error.context.http_code }}){% endif %}:</strong>
+    {{ api_error.message }}
+    <div class="small mt-1">
+        {% if api_error.context.http_code == 401 or api_error.context.http_code == 403 %}
+            {% trans %}Check that pdns_api.key in config/settings.php matches the API key configured in PowerDNS.{% endtrans %}
+        {% elseif api_error.context.http_code == 404 %}
+            {% trans %}Check that pdns_api.server_name matches what PowerDNS reports (default 'localhost').{% endtrans %}
+        {% elseif api_error.context.http_code >= 500 %}
+            {% trans %}PowerDNS rejected the request. Check the PowerDNS server log for the cause - a common trigger after importing zones directly into the PowerDNS database is a single malformed record that fails zone serialization.{% endtrans %}
+        {% else %}
+            {% trans %}Some features may be unavailable until the API is reachable again. Check your PowerDNS server log for details.{% endtrans %}
+        {% endif %}
+    </div>
+    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+</div>
+{% endif %}

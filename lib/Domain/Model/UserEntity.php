@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -36,7 +36,7 @@ class UserEntity
         return (bool)$stmt->fetch();
     }
 
-    public static function get_username_by_id($db, $user_id): string
+    public static function getUserNameById($db, $user_id): string
     {
         if ($user_id == "") {
             return "";
@@ -46,6 +46,11 @@ class UserEntity
         $stmt->execute(['user_id' => $user_id]);
 
         $user = $stmt->fetch();
+
+        // Handle case when user is not found (fetch returns false)
+        if ($user === false) {
+            return "";
+        }
 
         return $user['username'] ?: "";
     }

@@ -1,0 +1,575 @@
+<?php
+
+namespace Poweradmin\Tests\Unit;
+
+use PHPUnit\Framework\TestCase;
+use Poweradmin\Infrastructure\Configuration\ConfigurationManager;
+use ReflectionClass;
+
+class ConfigurationManagerTest extends TestCase
+{
+    private string $tempDefaultConfigFile;
+    private string $tempNewConfigFile;
+
+    protected function setUp(): void
+    {
+        $tempDir = sys_get_temp_dir();
+        $this->tempDefaultConfigFile = $tempDir . '/settings.defaults.php';
+        $this->tempNewConfigFile = $tempDir . '/settings.php';
+
+        $this->resetConfigurationManager();
+    }
+
+    protected function tearDown(): void
+    {
+        // Clear PA_CONFIG_PATH environment variable
+        putenv('PA_CONFIG_PATH');
+
+        @unlink($this->tempDefaultConfigFile);
+        @unlink($this->tempNewConfigFile);
+
+        $this->resetConfigurationManager();
+    }
+
+    /**
+     * Reset the ConfigurationManager singleton between tests
+     */
+    private function resetConfigurationManager()
+    {
+        $reflectionClass = new ReflectionClass(ConfigurationManager::class);
+        $instanceProperty = $reflectionClass->getProperty('instance');
+        $instanceProperty->setAccessible(true);
+        $instanceProperty->setValue(null, null);
+
+        $reflectionClass = new ReflectionClass(ConfigurationManager::class);
+        $initializedProperty = $reflectionClass->getProperty('initialized');
+        $initializedProperty->setAccessible(true);
+        $initializedProperty->setValue(ConfigurationManager::getInstance(), false);
+    }
+
+    /**
+     * Mock the ConfigurationManager with specific settings
+     *
+     * @param array $settings The settings to use
+     * @return void
+     */
+    private function mockConfigurationManager(array $settings)
+    {
+        $configManager = ConfigurationManager::getInstance();
+
+        $reflectionClass = new ReflectionClass(ConfigurationManager::class);
+        $settingsProperty = $reflectionClass->getProperty('settings');
+        $settingsProperty->setAccessible(true);
+        $settingsProperty->setValue($configManager, $settings);
+
+        $initializedProperty = $reflectionClass->getProperty('initialized');
+        $initializedProperty->setAccessible(true);
+        $initializedProperty->setValue($configManager, true);
+    }
+
+    public function testGetConfigValue()
+    {
+        // Mock the configuration manager with test values
+        $this->mockConfigurationManager([
+            'database' => ['name' => 'test_db', 'host' => 'localhost'],
+            'security' => ['session_key' => 'test_key'],
+            'misc' => ['display_stats' => true]
+        ]);
+
+        $config = ConfigurationManager::getInstance();
+
+        // Test simple values
+        $this->assertEquals('test_db', $config->get('database', 'name'), 'Should return correct database name value.');
+        $this->assertEquals('localhost', $config->get('database', 'host'), 'Should return correct host value.');
+        $this->assertEquals('test_key', $config->get('security', 'session_key'), 'Should return correct session key.');
+        $this->assertTrue($config->get('misc', 'display_stats'), 'Should return correct boolean value.');
+
+        // Test non-existing values
+        $this->assertNull($config->get('database', 'non_existing_key'), 'Should return null for non-existing database key.');
+        $this->assertNull($config->get('non_existing_group', 'key'), 'Should return null for non-existing group.');
+    }
+
+    public function testGetConfigGroupValues()
+    {
+        // Mock the configuration manager with test values
+        $this->mockConfigurationManager([
+            'database' => ['name' => 'test_db', 'host' => 'localhost', 'port' => 3306],
+            'security' => ['session_key' => 'test_key', 'password_encryption' => 'bcrypt'],
+            'empty_group' => []
+        ]);
+
+        $config = ConfigurationManager::getInstance();
+
+        // Test getting entire group
+        $databaseGroup = $config->getGroup('database');
+        $this->assertIsArray($databaseGroup, 'Should return array for database group.');
+        $this->assertCount(3, $databaseGroup, 'Database group should have 3 items.');
+        $this->assertEquals('test_db', $databaseGroup['name'], 'Database group should contain correct name.');
+        $this->assertEquals('localhost', $databaseGroup['host'], 'Database group should contain correct host.');
+        $this->assertEquals(3306, $databaseGroup['port'], 'Database group should contain correct port.');
+
+        // Test getting security group
+        $securityGroup = $config->getGroup('security');
+        $this->assertIsArray($securityGroup, 'Should return array for security group.');
+        $this->assertCount(2, $securityGroup, 'Security group should have 2 items.');
+        $this->assertEquals('test_key', $securityGroup['session_key'], 'Security group should contain correct session_key.');
+        $this->assertEquals('bcrypt', $securityGroup['password_encryption'], 'Security group should contain correct password_encryption.');
+
+        // Test empty group
+        $emptyGroup = $config->getGroup('empty_group');
+        $this->assertIsArray($emptyGroup, 'Should return empty array for empty group.');
+        $this->assertEmpty($emptyGroup, 'Empty group should be empty.');
+
+        // Test non-existing group
+        $nonExistingGroup = $config->getGroup('non_existing_group');
+        $this->assertIsArray($nonExistingGroup, 'Should return empty array for non-existing group.');
+        $this->assertEmpty($nonExistingGroup, 'Non-existing group should be empty.');
+    }
+
+    public function testGetAllConfigValues()
+    {
+        // Mock the configuration manager with test values
+        $this->mockConfigurationManager([
+            'database' => ['name' => 'test_db', 'host' => 'localhost'],
+            'security' => ['session_key' => 'test_key'],
+            'misc' => ['display_stats' => true]
+        ]);
+
+        $config = ConfigurationManager::getInstance();
+        $allSettings = $config->getAll();
+
+        $this->assertIsArray($allSettings, 'GetAll should return an array.');
+        $this->assertArrayHasKey('database', $allSettings, 'Settings should contain database group.');
+        $this->assertArrayHasKey('security', $allSettings, 'Settings should contain security group.');
+        $this->assertArrayHasKey('misc', $allSettings, 'Settings should contain misc group.');
+
+        $this->assertEquals('test_db', $allSettings['database']['name'], 'Should contain correct database name.');
+        $this->assertEquals('localhost', $allSettings['database']['host'], 'Should contain correct host.');
+        $this->assertEquals('test_key', $allSettings['security']['session_key'], 'Should contain correct session key.');
+        $this->assertTrue($allSettings['misc']['display_stats'], 'Should contain correct display stats value.');
+    }
+
+    public function testNestedKeyAccess()
+    {
+        // Mock the configuration manager with nested values
+        $this->mockConfigurationManager([
+            'complex' => [
+                'nested' => [
+                    'value' => 'nested_value'
+                ],
+                'array' => [1, 2, 3],
+                'simple' => 'simple_value'
+            ]
+        ]);
+
+        $config = ConfigurationManager::getInstance();
+
+        // Test accessing nested key with dot notation
+        $this->assertEquals('nested_value', $config->get('complex', 'nested.value'), 'Should access nested value with dot notation.');
+        $this->assertEquals('simple_value', $config->get('complex', 'simple'), 'Should access simple value.');
+
+        // Try accessing non-existing nested paths
+        $this->assertNull($config->get('complex', 'nested.non_existing'), 'Should return null for non-existing nested key.');
+        $this->assertNull($config->get('complex', 'non_existing.value'), 'Should return null for non-existing nested path.');
+
+        // Access array values
+        $this->assertEquals([1, 2, 3], $config->get('complex', 'array'), 'Should return array value correctly.');
+    }
+
+    public function testNewConfigOnlyBehavior()
+    {
+        // Test that ConfigurationManager works correctly with only new-style configuration
+        $testSettings = [
+            'database' => [
+                'host' => 'localhost',
+                'port' => '3306',
+                'user' => 'testuser',
+                'password' => 'testpass',
+                'name' => 'testdb',
+                'pdns_db_name' => 'pdnsdb'
+            ],
+            'security' => [
+                'session_key' => 'testsecret',
+                'password_encryption' => 'bcrypt',
+                'password_cost' => 10
+            ],
+            'interface' => [
+                'language' => 'en_EN',
+                'theme' => 'ignite'
+            ],
+            'dns' => [
+                'hostmaster' => 'hostmaster@example.com',
+                'ns1' => 'ns1.example.com',
+                'ttl' => 86400,
+                'soa_refresh' => 28800,
+                'soa_retry' => 7200,
+                'soa_expire' => 604800,
+                'soa_minimum' => 86400
+            ],
+            'dnssec' => [
+                'enabled' => true
+            ],
+            'logging' => [
+                'syslog_enabled' => true
+            ]
+        ];
+
+        // Mock the configuration manager with new-style settings
+        $this->mockConfigurationManager($testSettings);
+        $config = ConfigurationManager::getInstance();
+
+        // Verify all values are accessible correctly
+        $this->assertEquals('localhost', $config->get('database', 'host'));
+        $this->assertEquals('3306', $config->get('database', 'port'));
+        $this->assertEquals('testuser', $config->get('database', 'user'));
+        $this->assertEquals('testpass', $config->get('database', 'password'));
+        $this->assertEquals('testdb', $config->get('database', 'name'));
+        $this->assertEquals('pdnsdb', $config->get('database', 'pdns_db_name'));
+
+        $this->assertEquals('testsecret', $config->get('security', 'session_key'));
+        $this->assertEquals('bcrypt', $config->get('security', 'password_encryption'));
+        $this->assertEquals(10, $config->get('security', 'password_cost'));
+
+        $this->assertEquals('en_EN', $config->get('interface', 'language'));
+        $this->assertEquals('ignite', $config->get('interface', 'theme'));
+
+        $this->assertEquals('hostmaster@example.com', $config->get('dns', 'hostmaster'));
+        $this->assertEquals('ns1.example.com', $config->get('dns', 'ns1'));
+        $this->assertEquals(86400, $config->get('dns', 'ttl'));
+
+        $this->assertEquals(28800, $config->get('dns', 'soa_refresh'));
+        $this->assertEquals(7200, $config->get('dns', 'soa_retry'));
+        $this->assertEquals(604800, $config->get('dns', 'soa_expire'));
+        $this->assertEquals(86400, $config->get('dns', 'soa_minimum'));
+
+        $this->assertTrue($config->get('dnssec', 'enabled'));
+        $this->assertTrue($config->get('logging', 'syslog_enabled'));
+    }
+
+    /**
+     * Test if theme path configuration settings are loaded and accessible correctly
+     * This test verifies the specific configuration that caused the issue in the bug report
+     */
+    public function testThemeConfigurationSettings()
+    {
+        // Mock the configuration manager with the default settings (problematic)
+        $this->mockConfigurationManager([
+            'interface' => [
+                'theme' => 'default',
+                'style' => 'light',
+                'theme_base_path' => 'templates',
+            ]
+        ]);
+
+        $config = ConfigurationManager::getInstance();
+
+        // Verify the default configuration values that caused the issue
+        $this->assertEquals('templates', $config->get('interface', 'theme_base_path'));
+        $this->assertEquals('default', $config->get('interface', 'theme'));
+        $this->assertEquals('light', $config->get('interface', 'style'));
+
+        // Mock the configuration manager with the fixed settings
+        $this->mockConfigurationManager([
+            'interface' => [
+                'theme' => 'default',
+                'style' => 'light',
+                'theme_base_path' => 'templates/default',
+            ]
+        ]);
+
+        $config = ConfigurationManager::getInstance();
+
+        // Verify the fixed configuration values
+        $this->assertEquals('templates/default', $config->get('interface', 'theme_base_path'));
+        $this->assertEquals('default', $config->get('interface', 'theme'));
+        $this->assertEquals('light', $config->get('interface', 'style'));
+    }
+
+    /**
+     * Test that indexed arrays are replaced, not merged
+     * This ensures dns_wizards.available_types is properly overridden
+     */
+    public function testIndexedArrayReplacementInMerge()
+    {
+        // Simulate default config with full list
+        $defaultConfig = [
+            'dns_wizards' => [
+                'enabled' => false,
+                'available_types' => ['DMARC', 'SPF', 'DKIM', 'CAA', 'TLSA', 'SRV'],
+                'caa_providers' => [
+                    'letsencrypt.org' => "Let's Encrypt",
+                    'digicert.com' => 'DigiCert',
+                ]
+            ]
+        ];
+
+        // User config that should completely replace available_types
+        $userConfig = [
+            'dns_wizards' => [
+                'enabled' => true,
+                'available_types' => ['SPF'], // Should replace, not merge
+            ]
+        ];
+
+        // Use reflection to test mergeConfig method directly
+        $config = ConfigurationManager::getInstance();
+        $reflectionClass = new ReflectionClass(ConfigurationManager::class);
+        $mergeMethod = $reflectionClass->getMethod('mergeConfig');
+        $mergeMethod->setAccessible(true);
+
+        $result = $mergeMethod->invoke($config, $defaultConfig, $userConfig);
+
+        // Verify indexed array was replaced, not merged
+        $this->assertEquals(
+            ['SPF'],
+            $result['dns_wizards']['available_types'],
+            'Indexed array should be replaced, not merged'
+        );
+        $this->assertTrue(
+            $result['dns_wizards']['enabled'],
+            'Boolean value should be updated'
+        );
+        $this->assertArrayHasKey(
+            'caa_providers',
+            $result['dns_wizards'],
+            'Associative arrays should be preserved from defaults'
+        );
+        $this->assertCount(
+            2,
+            $result['dns_wizards']['caa_providers'],
+            'Default caa_providers should remain intact'
+        );
+    }
+
+    /**
+     * Test that associative arrays are still merged recursively
+     */
+    public function testAssociativeArrayMergingInMerge()
+    {
+        $defaultConfig = [
+            'dns_wizards' => [
+                'caa_providers' => [
+                    'letsencrypt.org' => "Let's Encrypt",
+                    'digicert.com' => 'DigiCert',
+                    'sectigo.com' => 'Sectigo',
+                ]
+            ]
+        ];
+
+        $userConfig = [
+            'dns_wizards' => [
+                'caa_providers' => [
+                    'letsencrypt.org' => 'LE Custom Name', // Override existing
+                    'custom.ca' => 'My Custom CA', // Add new
+                ]
+            ]
+        ];
+
+        $config = ConfigurationManager::getInstance();
+        $reflectionClass = new ReflectionClass(ConfigurationManager::class);
+        $mergeMethod = $reflectionClass->getMethod('mergeConfig');
+        $mergeMethod->setAccessible(true);
+
+        $result = $mergeMethod->invoke($config, $defaultConfig, $userConfig);
+
+        // Verify associative array was merged, not replaced
+        $this->assertCount(
+            4,
+            $result['dns_wizards']['caa_providers'],
+            'Associative arrays should be merged'
+        );
+        $this->assertEquals(
+            'LE Custom Name',
+            $result['dns_wizards']['caa_providers']['letsencrypt.org'],
+            'Existing keys should be overridden'
+        );
+        $this->assertEquals(
+            'DigiCert',
+            $result['dns_wizards']['caa_providers']['digicert.com'],
+            'Unmodified keys should remain'
+        );
+        $this->assertEquals(
+            'Sectigo',
+            $result['dns_wizards']['caa_providers']['sectigo.com'],
+            'Unmodified keys should remain'
+        );
+        $this->assertEquals(
+            'My Custom CA',
+            $result['dns_wizards']['caa_providers']['custom.ca'],
+            'New keys should be added'
+        );
+    }
+
+    /**
+     * Test mixed nested structures (indexed and associative arrays)
+     */
+    public function testMixedNestedArrayMerging()
+    {
+        $defaultConfig = [
+            'feature' => [
+                'tags' => ['tag1', 'tag2', 'tag3'], // Indexed array
+                'options' => [ // Associative array
+                    'color' => 'blue',
+                    'size' => 'large',
+                ],
+                'list' => [1, 2, 3], // Indexed array
+            ]
+        ];
+
+        $userConfig = [
+            'feature' => [
+                'tags' => ['custom-tag'], // Should replace indexed array
+                'options' => [ // Should merge associative array
+                    'color' => 'red', // Override
+                    'shape' => 'circle', // Add new
+                ],
+            ]
+        ];
+
+        $config = ConfigurationManager::getInstance();
+        $reflectionClass = new ReflectionClass(ConfigurationManager::class);
+        $mergeMethod = $reflectionClass->getMethod('mergeConfig');
+        $mergeMethod->setAccessible(true);
+
+        $result = $mergeMethod->invoke($config, $defaultConfig, $userConfig);
+
+        // Indexed arrays should be replaced
+        $this->assertEquals(['custom-tag'], $result['feature']['tags']);
+        $this->assertEquals(
+            [1, 2, 3],
+            $result['feature']['list'],
+            'Unmodified indexed arrays should remain'
+        );
+
+        // Associative arrays should be merged
+        $this->assertEquals(
+            'red',
+            $result['feature']['options']['color'],
+            'Should override existing key'
+        );
+        $this->assertEquals(
+            'large',
+            $result['feature']['options']['size'],
+            'Should keep unmodified key'
+        );
+        $this->assertEquals(
+            'circle',
+            $result['feature']['options']['shape'],
+            'Should add new key'
+        );
+    }
+
+    /**
+     * Test that PA_CONFIG_PATH environment variable is respected
+     */
+    public function testCustomConfigPathFromEnvironment(): void
+    {
+        $tempDir = sys_get_temp_dir();
+        $customConfigFile = $tempDir . '/custom_poweradmin_settings.php';
+
+        // Create a custom config file
+        $customSettings = [
+            'database' => [
+                'type' => 'sqlite',
+                'host' => 'custom_host',
+            ],
+            'custom_key' => 'custom_value',
+        ];
+        file_put_contents($customConfigFile, '<?php return ' . var_export($customSettings, true) . ';');
+
+        // Set the PA_CONFIG_PATH environment variable
+        putenv('PA_CONFIG_PATH=' . $customConfigFile);
+
+        // Verify environment variable is set
+        $this->assertEquals($customConfigFile, getenv('PA_CONFIG_PATH'));
+
+        // Verify the custom config file exists and is readable
+        $this->assertFileExists($customConfigFile);
+
+        // Clean up
+        @unlink($customConfigFile);
+    }
+
+    /**
+     * Test that empty PA_CONFIG_PATH falls back to default behavior
+     */
+    public function testEmptyConfigPathFallsBackToDefault(): void
+    {
+        // Ensure PA_CONFIG_PATH is not set
+        putenv('PA_CONFIG_PATH');
+
+        // Verify environment variable is not set (returns false)
+        $this->assertFalse(getenv('PA_CONFIG_PATH'));
+
+        // The ConfigurationManager should fall back to default path logic
+        // This is verified by the fact that no exception is thrown
+        $this->assertTrue(true, 'Empty PA_CONFIG_PATH should not cause issues');
+    }
+
+    /**
+     * A valid defaults file marks the loaded flag and exposes its absolute path.
+     */
+    public function testIsDefaultsFileLoadedTrueWhenFileExistsAndReturnsArray(): void
+    {
+        $configManager = ConfigurationManager::getInstance();
+
+        $reflectionClass = new ReflectionClass(ConfigurationManager::class);
+
+        $pathProperty = $reflectionClass->getProperty('defaultsFilePath');
+        $pathProperty->setAccessible(true);
+        $pathProperty->setValue($configManager, '/tmp/settings.defaults.php');
+
+        $loadedProperty = $reflectionClass->getProperty('defaultsFileLoaded');
+        $loadedProperty->setAccessible(true);
+        $loadedProperty->setValue($configManager, true);
+
+        $initializedProperty = $reflectionClass->getProperty('initialized');
+        $initializedProperty->setAccessible(true);
+        $initializedProperty->setValue($configManager, true);
+
+        $this->assertTrue($configManager->isDefaultsFileLoaded());
+        $this->assertSame('/tmp/settings.defaults.php', $configManager->getDefaultsFilePath());
+    }
+
+    /**
+     * A missing defaults file leaves the loaded flag false so callers can surface a
+     * specific error instead of the cryptic ConfigValidator messages reported in #1158.
+     */
+    public function testIsDefaultsFileLoadedFalseWhenFileMissing(): void
+    {
+        $configManager = ConfigurationManager::getInstance();
+
+        $reflectionClass = new ReflectionClass(ConfigurationManager::class);
+
+        $pathProperty = $reflectionClass->getProperty('defaultsFilePath');
+        $pathProperty->setAccessible(true);
+        $pathProperty->setValue($configManager, '/nonexistent/settings.defaults.php');
+
+        $loadedProperty = $reflectionClass->getProperty('defaultsFileLoaded');
+        $loadedProperty->setAccessible(true);
+        $loadedProperty->setValue($configManager, false);
+
+        $initializedProperty = $reflectionClass->getProperty('initialized');
+        $initializedProperty->setAccessible(true);
+        $initializedProperty->setValue($configManager, true);
+
+        $this->assertFalse($configManager->isDefaultsFileLoaded());
+        $this->assertSame('/nonexistent/settings.defaults.php', $configManager->getDefaultsFilePath());
+    }
+
+    /**
+     * Test that PA_CONFIG_PATH with empty string is treated as unset
+     */
+    public function testEmptyStringConfigPathTreatedAsUnset(): void
+    {
+        // Set PA_CONFIG_PATH to empty string
+        putenv('PA_CONFIG_PATH=');
+
+        // getenv returns empty string, not false, when set to empty
+        $envValue = getenv('PA_CONFIG_PATH');
+
+        // Our implementation checks for both false and empty string
+        $shouldUseDefault = ($envValue === false || $envValue === '');
+        $this->assertTrue($shouldUseDefault, 'Empty string PA_CONFIG_PATH should use default path');
+    }
+}

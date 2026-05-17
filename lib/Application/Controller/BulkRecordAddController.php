@@ -1,0 +1,275 @@
+<?php
+
+/*  Poweradmin, a friendly web-based admin tool for PowerDNS.
+ *  See <https://www.poweradmin.org> for more details.
+ *
+ *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
+ *  Copyright 2010-2025 Poweradmin Development Team
+ *
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation, either version 3 of the License, or
+ *  (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/**
+ * Script that handles bulk record addition to an existing zone
+ *
+ * @package     Poweradmin
+ * @copyright   2007-2010 Rejo Zenger <rejo@zenger.nl>
+ * @copyright   2010-2025 Poweradmin Development Team
+ * @license     https://opensource.org/licenses/GPL-3.0 GPL
+ */
+
+namespace Poweradmin\Application\Controller;
+
+use Exception;
+use Poweradmin\Application\Service\RecordCommentService;
+use Poweradmin\Application\Service\RecordCommentSyncService;
+use Poweradmin\Application\Service\RecordManagerService;
+use Poweradmin\BaseController;
+use Poweradmin\Domain\Service\BulkRecordParser;
+use Poweradmin\Domain\Service\RecordTypeService;
+use Poweradmin\Domain\Model\UserManager;
+use Poweradmin\Domain\Service\DnsIdnService;
+use Poweradmin\Domain\Service\DnsRecord;
+use Poweradmin\Domain\Service\UserContextService;
+use Poweradmin\Domain\Utility\DnsHelper;
+use Poweradmin\Infrastructure\Logger\LegacyLogger;
+use Poweradmin\Infrastructure\Utility\IpAddressRetriever;
+use Symfony\Component\Validator\Constraints as Assert;
+
+class BulkRecordAddController extends BaseController
+{
+    private LegacyLogger $auditLogger;
+    private DnsRecord $dnsRecord;
+    private RecordManagerService $recordManager;
+    private RecordTypeService $recordTypeService;
+    private UserContextService $userContextService;
+    private IpAddressRetriever $ipAddressRetriever;
+
+    public function __construct(array $request)
+    {
+        parent::__construct($request);
+
+        $this->auditLogger = new LegacyLogger($this->db);
+        $this->ipAddressRetriever = new IpAddressRetriever($_SERVER);
+        $this->dnsRecord = new DnsRecord($this->db, $this->getConfig());
+
+        $backendProvider = $this->createDnsBackendProvider();
+        $repositoryFactory = $this->getRepositoryFactory($backendProvider);
+        $recordCommentRepository = $repositoryFactory->createRecordCommentRepository();
+        $recordCommentService = new RecordCommentService($recordCommentRepository);
+        $commentSyncService = new RecordCommentSyncService($recordCommentService, null, $backendProvider);
+
+        $this->recordManager = new RecordManagerService(
+            $this->db,
+            $this->dnsRecord,
+            $recordCommentService,
+            $commentSyncService,
+            $this->auditLogger,
+            $this->getConfig(),
+            $backendProvider
+        );
+
+        $this->recordTypeService = new RecordTypeService($this->getConfig());
+        $this->userContextService = new UserContextService();
+    }
+
+    public function run(): void
+    {
+        $this->checkId();
+
+        $zone_id = (int)htmlspecialchars($this->getSafeRequestValue('id'));
+        $zone_type = $this->dnsRecord->getDomainType($zone_id);
+        $userId = $this->userContextService->getLoggedInUserId();
+        $user_is_zone_owner = UserManager::verifyUserIsOwnerZoneId($this->db, $zone_id);
+
+        // Check zone-specific edit permission (includes group permissions)
+        $canEdit = UserManager::canUserPerformZoneAction($this->db, $userId, $zone_id, 'zone_content_edit_own');
+        $canEditAsClient = UserManager::canUserPerformZoneAction($this->db, $userId, $zone_id, 'zone_content_edit_own_as_client');
+        $canEditOthers = UserManager::verifyPermission($this->db, 'zone_content_edit_others');
+
+        $this->checkCondition(
+            $zone_type == "SLAVE" || (!$canEditOthers && !$canEdit && !$canEditAsClient),
+            _('You do not have the permission to add records to this zone.')
+        );
+
+        if ($this->isPost()) {
+            $this->validateCsrfToken();
+            $this->doBulkRecordAddition();
+        } else {
+            $this->showBulkRecordAdditionForm();
+        }
+    }
+
+    private function doBulkRecordAddition(): void
+    {
+        $constraints = [
+            'records' => [
+                new Assert\NotBlank(message: _('Please provide at least one record.'))
+            ]
+        ];
+
+        $this->setValidationConstraints($constraints);
+
+        if (!$this->doValidateRequest($_POST)) {
+            $this->showFirstValidationError($_POST);
+        }
+
+        $zone_id = (int)$this->getSafeRequestValue('id');
+        $records_text = $_POST['records'];
+        $lines = explode("\n", trim($records_text));
+        $default_ttl = $this->config->get('dns', 'ttl', 3600);
+
+        $success_count = 0;
+        $failed_records = [];
+        $parser = new BulkRecordParser();
+
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if (empty($line)) {
+                continue;
+            }
+
+            $result = $parser->parseLine($line, $default_ttl);
+            if (is_string($result)) {
+                $failed_records[] = $line . " - " . $result;
+                continue;
+            }
+
+            $name = DnsIdnService::toPunycode($result['name']);
+            $type = $result['type'];
+            $content = $result['content'];
+            $prio = $result['prio'];
+            $ttl = $result['ttl'];
+            $disabled = $result['disabled'];
+            $comment = $result['comment'];
+
+            // Convert IDN content to punycode after full content assembly
+            $content = DnsIdnService::convertContentToPunycode($type, $content);
+
+            // Normalize record name to full FQDN (always, regardless of display setting)
+            // This converts @ to zone apex and ensures proper zone suffix
+            $zone_name = $this->dnsRecord->getDomainNameById($zone_id);
+            if ($zone_name === null) {
+                $failed_records[] = $line . " - " . _('Zone not found.');
+                continue;
+            }
+            $name = DnsHelper::restoreZoneSuffix($name, $zone_name);
+
+            // Validate record type. Filter by the connected server's
+            // capabilities so bulk import matches the add/edit dropdowns -
+            // otherwise users would get the same SVCB/HTTPS/WALLET line
+            // accepted here and rejected by PowerDNS later.
+            $isReverseZone = DnsHelper::isReverseZone($zone_name);
+            $isDnsSecEnabled = $this->config->get('dnssec', 'enabled', false);
+            $caps = $this->getPdnsCapabilities();
+            $valid_types = $isReverseZone
+                ? $this->recordTypeService->getReverseZoneTypes($isDnsSecEnabled, $caps)
+                : $this->recordTypeService->getDomainZoneTypes($isDnsSecEnabled, $caps);
+
+            if (!in_array($type, $valid_types)) {
+                $failed_records[] = $line . " - " . _('Invalid record type.');
+                continue;
+            }
+
+            try {
+                // For CNAME, MX, SRV, and similar records, ensure content ends with a dot
+                if (in_array($type, ['CNAME', 'MX', 'SRV', 'NS']) && !empty($content) && !str_ends_with($content, '.')) {
+                    $content .= '.';
+                }
+
+                if (
+                    $this->recordManager->createRecord(
+                        $zone_id,
+                        $name,
+                        $type,
+                        $content,
+                        $ttl,
+                        $prio,
+                        $comment,
+                        $this->userContextService->getLoggedInUsername(),
+                        $this->ipAddressRetriever->getClientIp(),
+                        $disabled
+                    )
+                ) {
+                    $success_count++;
+
+                    // Log the record creation
+                    $this->auditLogger->logInfo(sprintf(
+                        'client_ip:%s user:%s operation:add_record name:%s type:%s content:%s ttl:%s prio:%s',
+                        $this->ipAddressRetriever->getClientIp(),
+                        $this->userContextService->getLoggedInUsername(),
+                        $name,
+                        $type,
+                        $content,
+                        $ttl,
+                        $prio
+                    ), $zone_id);
+                } else {
+                    $failed_records[] = $line . " - " . _('Record could not be added.');
+                }
+            } catch (Exception $e) {
+                $failed_records[] = $line . " - " . $e->getMessage();
+            }
+        }
+
+        if (!$failed_records) {
+            $this->setMessage('edit', 'success', sprintf(_('%d record(s) have been added successfully.'), $success_count));
+            $this->redirect('/zones/' . $zone_id . '/edit');
+        } else {
+            $this->setMessage('bulk_record_add', 'warn', _('Some record(s) could not be added.'));
+            $this->showBulkRecordAdditionForm($failed_records);
+        }
+    }
+
+    private function showBulkRecordAdditionForm(array $failed_records = []): void
+    {
+        $zone_id = (int)htmlspecialchars($this->getSafeRequestValue('id'));
+        $zone_name = $this->dnsRecord->getDomainNameById($zone_id);
+
+        // For internationalized domain names
+        if (str_starts_with($zone_name, "xn--")) {
+            $idn_zone_name = DnsIdnService::toUtf8($zone_name);
+        } else {
+            $idn_zone_name = "";
+        }
+
+        $this->render('bulk_record_add.html', [
+            'zone_id' => $zone_id,
+            'zone_name' => $zone_name,
+            'idn_zone_name' => $idn_zone_name,
+            'failed_records' => $failed_records,
+            'default_ttl' => $this->config->get('dns', 'ttl', 3600),
+            'iface_record_comments' => $this->config->get('interface', 'show_record_comments', true),
+            'is_reverse_zone' => $zone_name !== null && DnsHelper::isReverseZone($zone_name),
+            'display_hostname_only' => $this->createUserPreferenceService()->getDisplayHostnameOnly(
+                $this->userContextService->getLoggedInUserId()
+            ),
+        ]);
+    }
+
+    public function checkId(): void
+    {
+        $constraints = [
+            'id' => [
+                new Assert\NotBlank(message: _('Zone ID is required.'))
+            ]
+        ];
+
+        $this->setValidationConstraints($constraints);
+
+        if (!$this->doValidateRequest($this->requestData)) {
+            $this->showFirstValidationError($this->requestData);
+        }
+    }
+}

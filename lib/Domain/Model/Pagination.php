@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -108,5 +108,25 @@ class Pagination
     public function getPreviousPage(): int
     {
         return $this->hasPreviousPage() ? $this->currentPage - 1 : $this->currentPage;
+    }
+
+    /**
+     * Get the offset for database queries
+     *
+     * @return int The offset value
+     */
+    public function getOffset(): int
+    {
+        return ($this->currentPage - 1) * $this->itemsPerPage;
+    }
+
+    /**
+     * Get the limit for database queries
+     *
+     * @return int The limit value
+     */
+    public function getLimit(): int
+    {
+        return $this->itemsPerPage;
     }
 }

@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -25,21 +25,38 @@
  *
  * @package     Poweradmin
  * @copyright   2007-2010 Rejo Zenger <rejo@zenger.nl>
- * @copyright   2010-2024 Poweradmin Development Team
+ * @copyright   2010-2025 Poweradmin Development Team
  * @license     https://opensource.org/licenses/GPL-3.0 GPL
  */
 
 namespace Poweradmin\Application\Controller;
 
+use Poweradmin\Application\Presenter\PaginationPresenter;
 use Poweradmin\BaseController;
 use Poweradmin\Domain\Model\Permission;
 use Poweradmin\Domain\Model\UserManager;
+use Poweradmin\Infrastructure\Service\HttpPaginationParameters;
 
 class UsersController extends BaseController
 {
 
     public function run(): void
     {
+        // Check if user has permission to view or edit other users before processing
+        $canViewOthers = UserManager::verifyPermission($this->db, 'user_view_others');
+        $canEditOthers = UserManager::verifyPermission($this->db, 'user_edit_others');
+
+        // If user doesn't have permissions to view/edit others, redirect to home
+        if (!$canViewOthers && !$canEditOthers) {
+            $this->setMessage('index', 'error', _('You do not have permission to view the users list.'));
+            $this->redirect('/');
+            return;
+        }
+
+        // Set the current page for navigation highlighting
+        $this->setCurrentPage('users');
+        $this->setPageTitle(_('Users'));
+
         if ($this->isPost()) {
             $this->validateCsrfToken();
             $this->updateUsers();
@@ -52,7 +69,7 @@ class UsersController extends BaseController
         $success = false;
         foreach ($_POST['user'] as $user) {
             $legacyUsers = new UserManager($this->db, $this->getConfig());
-            $result = $legacyUsers->update_user_details($user);
+            $result = $legacyUsers->updateUserDetails($user);
             if ($result) {
                 $success = true;
             }
@@ -75,13 +92,42 @@ class UsersController extends BaseController
             ]
         );
 
+        // Pagination setup
+        $httpParameters = new HttpPaginationParameters();
+        $currentPage = $httpParameters->getCurrentPage();
+        $rowsPerPage = $this->config->get('interface', 'rows_per_page', 50);
+
+        $paginationService = $this->createPaginationService();
+        $rowsPerPage = $paginationService->getUserRowsPerPage($rowsPerPage, $this->getCurrentUserId());
+
+        // Get total count and paginated users
+        $totalUsers = UserManager::countUsers($this->db);
+        $offset = ($currentPage - 1) * $rowsPerPage;
+        $users = UserManager::getUserDetailList(
+            $this->db,
+            $this->config->get('ldap', 'enabled', false),
+            null,
+            $rowsPerPage,
+            $offset
+        );
+
+        // Create pagination
+        $pagination = $paginationService->createPagination($totalUsers, $rowsPerPage, $currentPage);
+        $baseUrlPrefix = $this->config->get('interface', 'base_url_prefix', '');
+        $paginationPresenter = new PaginationPresenter($pagination, $baseUrlPrefix . '/users?start={PageNumber}');
+
         $this->render('users.html', [
             'permissions' => $permissions,
-            'perm_templates' => UserManager::list_permission_templates($this->db),
-            'users' => UserManager::get_user_detail_list($this->db, $this->config('ldap_use')),
-            'ldap_use' => $this->config('ldap_use'),
+            'perm_templates' => UserManager::listPermissionTemplates($this->db, 'user'),
+            'users' => $users,
             'session_userid' => $_SESSION["userid"],
-            'perm_add_new' => UserManager::verify_permission($this->db, 'user_add_new'),
+            'perm_add_new' => UserManager::verifyPermission($this->db, 'user_add_new'),
+            'pagination' => $paginationPresenter->present(),
+            'total_users' => $totalUsers,
+            'rows_per_page' => $rowsPerPage,
+            'mfa_enabled' => $this->config->get('security', 'mfa.enabled', false),
+            'show_user_access_templates' => $this->config->get('permissions', 'show_user_access_templates', true),
+            'show_group_access_templates' => $this->config->get('permissions', 'show_group_access_templates', true),
         ]);
     }
 }

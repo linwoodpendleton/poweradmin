@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -24,22 +24,31 @@ namespace Poweradmin\Application\Service;
 
 use Exception;
 use Poweradmin\Domain\Service\DatabaseConnection;
-use Poweradmin\Infrastructure\Database\PDOLayer;
+use PDO;
 use RuntimeException;
 
-class DatabaseService {
+class DatabaseService
+{
     private DatabaseConnection $databaseConnection;
 
-    public function __construct(DatabaseConnection $databaseConnection) {
+    public function __construct(DatabaseConnection $databaseConnection)
+    {
         $this->databaseConnection = $databaseConnection;
     }
 
-    public function connect(array $credentials): PDOLayer
+    public function connect(array $credentials): PDO
     {
         try {
             return $this->databaseConnection->connect($credentials);
         } catch (Exception $e) {
-            throw new RuntimeException("Database connection failed: " . $e->getMessage());
+            $errorMsg = "Database connection failed: " . $e->getMessage();
+
+            // Provide more helpful error messages for configuration issues
+            if (empty($credentials['db_type'])) {
+                $errorMsg .= " Check that your config/settings.php file has the correct database configuration.";
+            }
+
+            throw new RuntimeException($errorMsg);
         }
     }
 }

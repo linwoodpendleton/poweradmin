@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -25,77 +25,116 @@
  *
  * @package     Poweradmin
  * @copyright   2007-2010 Rejo Zenger <rejo@zenger.nl>
- * @copyright   2010-2024 Poweradmin Development Team
+ * @copyright   2010-2025 Poweradmin Development Team
  * @license     https://opensource.org/licenses/GPL-3.0 GPL
  */
 
 namespace Poweradmin\Application\Controller;
 
+use Exception;
+use Poweradmin\Application\Service\AuditService;
 use Poweradmin\Application\Service\DnssecProviderFactory;
 use Poweradmin\BaseController;
 use Poweradmin\Domain\Model\DnssecAlgorithm;
+use Poweradmin\Domain\Model\Permission;
 use Poweradmin\Domain\Model\UserManager;
+use Poweradmin\Domain\Service\DnsIdnService;
 use Poweradmin\Domain\Service\DnsRecord;
 use Poweradmin\Domain\Service\Validator;
+use Poweradmin\Domain\Utility\DnsHelper;
 
 class DnssecDeleteKeyController extends BaseController
 {
 
     public function run(): void
     {
-        $zone_id = "-1";
-        if (isset($_GET['id']) && Validator::is_number($_GET['id'])) {
-            $zone_id = htmlspecialchars($_GET['id']);
+        $zone_id = $this->getSafeRequestValue('zone_id');
+        if (!$zone_id || !Validator::isNumber($zone_id)) {
+            $this->showError(_('Invalid zone ID.'));
+            return;
+        }
+        $zone_id = (int) $zone_id;
+
+        $key_id = $this->getSafeRequestValue('key_id');
+        if (!$key_id || !Validator::isNumber($key_id)) {
+            $this->showError(_('Invalid key ID.'));
+            return;
+        }
+        $key_id = (int) $key_id;
+
+
+        // Early permission check - validate DNSSEC access before any operations
+        $perm_view = Permission::getViewPermission($this->db);
+        $perm_edit = Permission::getEditPermission($this->db);
+        $user_is_zone_owner = UserManager::verifyUserIsOwnerZoneId($this->db, $zone_id);
+
+        // Check view permission first
+        if ($perm_view == "none" || ($perm_view == "own" && !$user_is_zone_owner)) {
+            $this->showError(_("You do not have permission to view this zone."));
+            return;
         }
 
-        $key_id = "-1";
-        if (isset($_GET['key_id']) && Validator::is_number($_GET['key_id'])) {
-            $key_id = (int)$_GET['key_id'];
-        }
-
-        $confirm = "-1";
-        if (isset($_GET['confirm']) && Validator::is_number($_GET['confirm'])) {
-            $confirm = $_GET['confirm'];
-        }
-
-        $user_is_zone_owner = UserManager::verify_user_is_owner_zoneid($this->db, $zone_id);
-
-        if ($zone_id == "-1") {
-            $this->showError(_('Invalid or unexpected input given.'));
-        }
-
+        // Validate zone existence
         $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-        $domain_name = $dnsRecord->get_domain_name_by_id($zone_id);
-
-        if ($key_id == "-1") {
-            $this->showError(_('Invalid or unexpected input given.'));
+        if (!$dnsRecord->zoneIdExists($zone_id)) {
+            $this->showError(_('There is no zone with this ID.'));
+            return;
         }
 
+        if ($perm_edit !== "all" && !($perm_edit === "own" && $user_is_zone_owner)) {
+            $this->showError(_("You do not have permission to manage DNSSEC for this zone."));
+            return;
+        }
+
+        $domain_name = $dnsRecord->getDomainNameById($zone_id);
         $dnssecProvider = DnssecProviderFactory::create($this->db, $this->getConfig());
 
         if (!$dnssecProvider->keyExists($domain_name, $key_id)) {
             $this->showError(_('Invalid or unexpected input given.'));
+            return;
         }
 
-        if ($user_is_zone_owner != "1") {
-            $this->showError(_('Failed to delete DNSSEC key.'));
-        }
+        if ($this->isPost()) {
+            $this->validateCsrfToken();
+            try {
+                $result = $dnssecProvider->removeZoneKey($domain_name, $key_id);
 
-        if ($confirm == '1' && $dnssecProvider->removeZoneKey($domain_name, $key_id)) {
-            $this->setMessage('dnssec', 'success', _('Zone key has been deleted successfully.'));
-            $this->redirect('index.php', ['page'=> 'dnssec', 'id' => $zone_id]);
+                // Check if key still exists to verify deletion
+                $keyStillExists = $domain_name !== null && $dnssecProvider->keyExists($domain_name, $key_id);
+
+                if ($result && !$keyStillExists) {
+                    $auditService = new AuditService($this->db);
+                    $auditService->logDnssecDeleteKey($zone_id, $domain_name, $key_id);
+                    $this->setMessage('dnssec', 'success', _('Zone key has been deleted successfully.'));
+                } else {
+                    $this->logger->warning('DNSSEC key deletion verification failed: domain={domain}, key_id={key_id}, api_result={api_result}, key_exists={key_exists}', [
+                        'domain' => $domain_name,
+                        'key_id' => $key_id,
+                        'api_result' => (int)$result,
+                        'key_exists' => (int)$keyStillExists,
+                    ]);
+                    $this->setMessage('dnssec', 'error', _('Failed to delete the zone key.'));
+                }
+
+                // Redirect back to DNSSEC page in either case
+                $this->redirect('/zones/' . $zone_id . '/dnssec');
+            } catch (Exception $e) {
+                $this->logger->error('DNSSEC key deletion exception: {error}', ['error' => $e->getMessage()]);
+                $this->setMessage('dnssec', 'error', _('An error occurred while deleting the DNSSEC key: ') . $e->getMessage());
+                $this->redirect('/zones/' . $zone_id . '/dnssec');
+            }
         }
 
         $this->showKeyInfo($domain_name, $key_id, $zone_id);
     }
 
-    public function showKeyInfo($domain_name, $key_id, string $zone_id): void
+    public function showKeyInfo($domain_name, $key_id, int $zone_id): void
     {
         $dnssecProvider = DnssecProviderFactory::create($this->db, $this->getConfig());
         $key_info = $dnssecProvider->getZoneKey($domain_name, $key_id);
 
         if (str_starts_with($domain_name, "xn--")) {
-            $idn_zone_name = idn_to_utf8($domain_name, IDNA_NONTRANSITIONAL_TO_ASCII);
+            $idn_zone_name = DnsIdnService::toUtf8($domain_name);
         } else {
             $idn_zone_name = "";
         }
@@ -107,6 +146,7 @@ class DnssecDeleteKeyController extends BaseController
             'key_info' => $key_info,
             'algorithms' => DnssecAlgorithm::ALGORITHMS,
             'zone_id' => $zone_id,
+            'is_reverse_zone' => DnsHelper::isReverseZone($domain_name),
         ]);
     }
 }

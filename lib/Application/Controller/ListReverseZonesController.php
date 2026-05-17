@@ -1,0 +1,284 @@
+<?php
+
+/*  Poweradmin, a friendly web-based admin tool for PowerDNS.
+ *  See <https://www.poweradmin.org> for more details.
+ *
+ *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
+ *  Copyright 2010-2026 Poweradmin Development Team
+ *
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation, either version 3 of the License, or
+ *  (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/**
+ * Script that displays reverse zone list
+ *
+ * @package     Poweradmin
+ * @copyright   2007-2010 Rejo Zenger <rejo@zenger.nl>
+ * @copyright   2010-2025 Poweradmin Development Team
+ * @license     https://opensource.org/licenses/GPL-3.0 GPL
+ */
+
+namespace Poweradmin\Application\Controller;
+
+use Poweradmin\Application\Presenter\PaginationPresenter;
+use Poweradmin\Application\Service\DnsBackendProviderFactory;
+use Poweradmin\Application\Service\DnsDataService;
+use Poweradmin\Application\Service\HybridPermissionService;
+use Poweradmin\Application\Service\PaginationService;
+use Poweradmin\BaseController;
+use Poweradmin\Domain\Model\Permission;
+use Poweradmin\Domain\Model\UserManager;
+use Poweradmin\Domain\Service\ForwardZoneAssociationService;
+use Poweradmin\Domain\Service\UserContextService;
+use Poweradmin\Domain\Service\ZoneOwnershipModeService;
+use Poweradmin\Domain\Service\ZoneSortingService;
+use Poweradmin\Infrastructure\Repository\DbUserGroupMemberRepository;
+use Poweradmin\Infrastructure\Repository\DbZoneGroupRepository;
+use Poweradmin\Infrastructure\Repository\DbUserGroupRepository;
+use Poweradmin\Infrastructure\Service\HttpPaginationParameters;
+use Poweradmin\Domain\Utility\IpHelper;
+
+class ListReverseZonesController extends BaseController
+{
+    private DnsDataService $dnsDataService;
+    private ForwardZoneAssociationService $forwardZoneAssociationService;
+    private UserContextService $userContextService;
+    private ZoneSortingService $zoneSortingService;
+
+    public function __construct(array $request)
+    {
+        parent::__construct($request);
+
+        // Initialize repository and services
+        $zoneRepository = $this->createZoneRepository();
+        $this->dnsDataService = $this->createDnsDataService();
+        $this->forwardZoneAssociationService = new ForwardZoneAssociationService($zoneRepository);
+        $this->userContextService = new UserContextService();
+        $this->zoneSortingService = new ZoneSortingService();
+    }
+
+    public function run(): void
+    {
+        $perm_view_zone_own = UserManager::verifyPermission($this->db, 'zone_content_view_own');
+        $perm_view_zone_others = UserManager::verifyPermission($this->db, 'zone_content_view_others');
+
+        $permission_check = !($perm_view_zone_own || $perm_view_zone_others);
+        $this->checkCondition($permission_check, _('You do not have sufficient permissions to view this page.'));
+
+        // Set the current page for navigation highlighting
+        $this->setCurrentPage('list_reverse_zones');
+        $this->setPageTitle(_('Reverse Zones'));
+
+        $this->listReverseZones();
+    }
+
+    private function listReverseZones(): void
+    {
+        $pdnssec_use = $this->config->get('dnssec', 'enabled', false);
+        $iface_zonelist_fullname = $this->config->get('interface', 'display_fullname_in_zone_list', false);
+
+        // Get user preferences for zone list display
+        $userPreferenceService = $this->createUserPreferenceService();
+        $userId = $this->getCurrentUserId();
+        $iface_zonelist_serial = $userPreferenceService->getShowZoneSerial($userId);
+        $iface_zonelist_template = $userPreferenceService->getShowZoneTemplate($userId);
+
+        // Create pagination service and get user preference
+        $paginationService = $this->createPaginationService();
+        $default_rowamount = $this->config->get('interface', 'rows_per_page', 10);
+        $iface_rowamount = $paginationService->getUserRowsPerPage($default_rowamount, $userId);
+
+        $row_start = 0;
+        if (isset($_GET['start'])) {
+            $start = (int)htmlspecialchars($_GET['start']);
+            $row_start = ($start - 1) * $iface_rowamount;
+        }
+
+        $perm_view = Permission::getViewPermission($this->db);
+        $perm_edit = Permission::getEditPermission($this->db);
+        $perm_delete = Permission::getDeletePermission($this->db);
+        $count_zones_view = $this->dnsDataService->countZones($perm_view, 'all', 'reverse');
+        $count_zones_edit = $this->dnsDataService->countZones($perm_edit, 'all', 'reverse');
+        $count_zones_delete = $this->dnsDataService->countZones($perm_delete, 'all', 'reverse');
+
+        $ownershipMode = new ZoneOwnershipModeService($this->getConfig());
+        $isUserOwnerAllowed = $ownershipMode->isUserOwnerAllowed();
+        // Group sort relies on JOINs against Poweradmin tables, which the API-backed repository can't perform
+        $isApiBackend = DnsBackendProviderFactory::isApiBackend($this->getConfig());
+        $isGroupOwnerAllowed = $ownershipMode->isGroupOwnerAllowed();
+        $isGroupSortSupported = $isGroupOwnerAllowed && !$isApiBackend;
+
+        $allowedSort = ['name', 'type', 'count_records'];
+        if ($isUserOwnerAllowed) {
+            $allowedSort[] = 'owner';
+        }
+        if ($isGroupSortSupported) {
+            $allowedSort[] = 'group';
+        }
+
+        list($zone_sort_by, $zone_sort_direction) = $this->zoneSortingService->getZoneSortOrder('zone_sort_by', $allowedSort);
+
+        if ($perm_view == 'none') {
+            $this->showError(_('You do not have the permission to see any zones.'));
+        }
+
+        // Get the reverse zone filter type from the request
+        $reverse_zone_type = $this->zoneSortingService->getReverseZoneTypeFilter();
+        $loggedInUserId = $this->userContextService->getLoggedInUserId();
+
+        // Get all counts in a single call
+        $zoneCounts = $this->dnsDataService->getReverseZoneCounts($perm_view, $loggedInUserId);
+        $count_all_reverse_zones = $zoneCounts['count_all'];
+        $count_ipv4_zones = $zoneCounts['count_ipv4'];
+        $count_ipv6_zones = $zoneCounts['count_ipv6'];
+
+        // Get the actual zones for the current page
+        $reverse_zones = $this->dnsDataService->getReverseZones(
+            $perm_view,
+            $loggedInUserId,
+            $reverse_zone_type,
+            $row_start,
+            $iface_rowamount,
+            $zone_sort_by,
+            $zone_sort_direction,
+            $iface_zonelist_serial,
+            $iface_zonelist_template
+        );
+
+        // Apply client-side sorting when sorting by name for additional flexibility
+        if ($zone_sort_by === 'name' && !empty($reverse_zones)) {
+            $sort_type = $this->config->get('interface', 'reverse_zone_sort', 'natural');
+            $reverse_zones = $this->zoneSortingService->applySortingToZones($reverse_zones, $zone_sort_by, $sort_type);
+        }
+
+        // Get associated forward zones only if enabled (configurable for performance)
+        $showForwardZoneAssociations = $this->config->get('interface', 'show_forward_zone_associations', true);
+        $associatedForwardZones = $showForwardZoneAssociations
+            ? $this->forwardZoneAssociationService->getAssociatedForwardZones($reverse_zones)
+            : [];
+
+        // Calculate pagination count based on current filter (using pre-computed counts)
+        $pagination_count = match ($reverse_zone_type) {
+            'ipv4' => $count_ipv4_zones,
+            'ipv6' => $count_ipv6_zones,
+            default => $count_all_reverse_zones,
+        };
+
+        // Augment zones with group information and shorten IPv6 reverse zones
+        $zoneGroupRepo = new DbZoneGroupRepository($this->db, $this->getConfig(), DnsBackendProviderFactory::isApiBackend($this->getConfig()));
+        $userGroupRepo = new DbUserGroupRepository($this->db);
+        $memberRepo = new DbUserGroupMemberRepository($this->db);
+        $allGroups = $userGroupRepo->findAll();
+
+        // Resolve where the user can delete (direct vs. which groups grant it). Two
+        // queries up front lets the per-row decision below stay in PHP, instead of
+        // running canUserPerformZoneAction once per rendered zone.
+        $hybridPermissions = new HybridPermissionService($this->db, $userGroupRepo, $memberRepo);
+        $deleteSources = $perm_delete === 'own'
+            ? $hybridPermissions->getPermissionSourcesForUser($loggedInUserId, 'zone_delete_own')
+            : ['has_direct' => false, 'group_ids' => []];
+        $loggedInUsername = $this->userContextService->getLoggedInUsername();
+
+        foreach ($reverse_zones as &$zone) {
+            // Shorten IPv6 reverse zones for display
+            if (isset($zone['utf8_name']) && str_ends_with($zone['utf8_name'], '.ip6.arpa')) {
+                $shortened = IpHelper::shortenIPv6ReverseZone($zone['utf8_name']);
+                $zone['utf8_name'] = $shortened ?? $zone['utf8_name'];
+            }
+
+            $groupOwnerships = $zoneGroupRepo->findByDomainId($zone['id']);
+            $zoneGroupIds = array_map(fn($zg) => $zg->getGroupId(), $groupOwnerships);
+            $zone['groups'] = array_map(function ($zg) use ($allGroups) {
+                $groupId = $zg->getGroupId();
+                foreach ($allGroups as $group) {
+                    if ($group->getId() === $groupId) {
+                        return $group->getName();
+                    }
+                }
+                return 'Group #' . $groupId;
+            }, $groupOwnerships);
+
+            // Delete eligibility for the per-row delete control: must mirror the
+            // hybrid check the delete endpoint runs so the button only appears when
+            // the action will actually be permitted.
+            if ($perm_delete === 'all') {
+                $zone['user_can_delete'] = true;
+            } elseif ($perm_delete === 'own') {
+                $directGrants = $deleteSources['has_direct']
+                    && in_array($loggedInUsername, $zone['users'] ?? [], true);
+                $groupGrants = !empty(array_intersect($deleteSources['group_ids'], $zoneGroupIds));
+                $zone['user_can_delete'] = $directGrants || $groupGrants;
+            } else {
+                $zone['user_can_delete'] = false;
+            }
+        }
+        unset($zone); // Break the reference
+
+        $this->render('list_reverse_zones.html', [
+            'zones' => $reverse_zones,
+            'count_zones_view' => $count_zones_view,
+            'count_zones_edit' => $count_zones_edit,
+            'count_zones_delete' => $count_zones_delete,
+            'iface_rowamount' => $iface_rowamount,
+            'zone_sort_by' => $zone_sort_by,
+            'zone_sort_direction' => $zone_sort_direction,
+            'iface_zonelist_serial' => $iface_zonelist_serial,
+            'iface_zonelist_template' => $iface_zonelist_template,
+            'iface_zonelist_fullname' => $iface_zonelist_fullname,
+            'is_user_owner_allowed' => $isUserOwnerAllowed,
+            'is_group_owner_allowed' => $isGroupOwnerAllowed,
+            'is_group_sort_supported' => $isGroupSortSupported,
+            'pdnssec_use' => $pdnssec_use,
+            'pagination' => $this->createAndPresentPagination($pagination_count, $iface_rowamount),
+            'session_userlogin' => $this->userContextService->getLoggedInUsername(),
+            'perm_edit' => $perm_edit,
+            'perm_delete' => $perm_delete,
+            'perm_zone_master_add' => UserManager::verifyPermission($this->db, 'zone_master_add'),
+            'perm_zone_slave_add' => UserManager::verifyPermission($this->db, 'zone_slave_add'),
+            'perm_is_godlike' => UserManager::verifyPermission($this->db, 'user_is_ueberuser'),
+            'reverse_zone_type' => $reverse_zone_type,
+            'count_ipv4_zones' => $count_ipv4_zones,
+            'count_ipv6_zones' => $count_ipv6_zones,
+            'count_all_reverse_zones' => $count_all_reverse_zones,
+            'associated_forward_zones' => $associatedForwardZones,
+            'show_forward_zone_associations' => $showForwardZoneAssociations,
+        ]);
+    }
+
+    private function createAndPresentPagination(int $totalItems, string $itemsPerPage): string
+    {
+        $httpParameters = new HttpPaginationParameters();
+        $currentPage = $httpParameters->getCurrentPage();
+
+        $paginationService = new PaginationService();
+        $pagination = $paginationService->createPagination($totalItems, $itemsPerPage, $currentPage);
+
+        $baseUrlPrefix = $this->config->get('interface', 'base_url_prefix', '');
+        $paginationUrl = $baseUrlPrefix . '/zones/reverse?start={PageNumber}';
+
+        // Add reverse_type parameter if it exists
+        if (isset($_GET['reverse_type'])) {
+            $paginationUrl .= '&reverse_type=' . htmlspecialchars($_GET['reverse_type']);
+        }
+
+        // Add rows_per_page parameter if it exists
+        if (isset($_GET['rows_per_page'])) {
+            $paginationUrl .= '&rows_per_page=' . htmlspecialchars($_GET['rows_per_page']);
+        }
+
+        $presenter = new PaginationPresenter($pagination, $paginationUrl);
+
+        return $presenter->present();
+    }
+}

@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2026 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -25,29 +25,42 @@
  *
  * @package     Poweradmin
  * @copyright   2007-2010 Rejo Zenger <rejo@zenger.nl>
- * @copyright   2010-2024 Poweradmin Development Team
+ * @copyright   2010-2025 Poweradmin Development Team
  * @license     https://opensource.org/licenses/GPL-3.0 GPL
  */
 
 namespace Poweradmin\Application\Controller;
 
 use Poweradmin\BaseController;
+use Poweradmin\Domain\Service\UserContextService;
+use Poweradmin\Infrastructure\Logger\LegacyLogger;
 use Poweradmin\Infrastructure\Repository\DbPermissionTemplateRepository;
+use Poweradmin\Infrastructure\Utility\IpAddressRetriever;
 
 class EditPermTemplController extends BaseController
 {
     private DbPermissionTemplateRepository $permissionTemplate;
+    private LegacyLogger $auditLogger;
+    private UserContextService $userContextService;
+    private IpAddressRetriever $ipAddressRetriever;
 
     public function __construct(array $request)
     {
         parent::__construct($request);
 
-        $this->permissionTemplate = new DbPermissionTemplateRepository($this->db);
+        $this->permissionTemplate = new DbPermissionTemplateRepository($this->db, $this->getConfig());
+        $this->auditLogger = new LegacyLogger($this->db);
+        $this->userContextService = new UserContextService();
+        $this->ipAddressRetriever = new IpAddressRetriever($_SERVER);
     }
 
     public function run(): void
     {
         $this->checkPermission('templ_perm_edit', _("You do not have the permission to edit permission templates."));
+
+        // Set the current page for navigation highlighting
+        $this->setCurrentPage('edit_perm_templ');
+        $this->setPageTitle(_('Edit Permission Template'));
 
         if (!$this->validateRequest()) {
             $this->showFirstValidationError();
@@ -71,8 +84,17 @@ class EditPermTemplController extends BaseController
         }
 
         $this->permissionTemplate->updatePermissionTemplateDetails($this->getRequest());
+
+        $this->auditLogger->logInfo(sprintf(
+            'client_ip:%s user:%s operation:edit_perm_template id:%s name:%s',
+            $this->ipAddressRetriever->getClientIp(),
+            $this->userContextService->getLoggedInUsername(),
+            $this->getSafeRequestValue('id'),
+            $this->getSafeRequestValue('templ_name')
+        ));
+
         $this->setMessage('list_perm_templ', 'success', _('The permission template has been updated successfully.'));
-        $this->redirect('index.php', ['page'=> 'list_perm_templ']);
+        $this->redirect('/permissions/templates');
     }
 
     private function showForm(): void
@@ -83,6 +105,8 @@ class EditPermTemplController extends BaseController
             'templ' => $this->permissionTemplate->getPermissionTemplateDetails($id),
             'perms_templ' => $this->permissionTemplate->getPermissionsByTemplateId($id),
             'perms_avail' => $this->permissionTemplate->getPermissionsByTemplateId(),
+            'show_user_access_templates' => $this->config->get('permissions', 'show_user_access_templates', true),
+            'show_group_access_templates' => $this->config->get('permissions', 'show_group_access_templates', true),
         ]);
     }
 
@@ -99,7 +123,10 @@ class EditPermTemplController extends BaseController
     private function validateSubmitRequest(): bool
     {
         $this->setRequestRules([
-            'required' => ['templ_name'],
+            'required' => ['templ_name', 'template_type'],
+            'in' => [
+                ['template_type', ['user', 'group']]
+            ],
         ]);
 
         return $this->doValidateRequest();

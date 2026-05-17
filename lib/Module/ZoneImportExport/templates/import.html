@@ -1,0 +1,234 @@
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="{{ base_url_prefix }}/">{% trans %}Home{% endtrans %}</a></li>
+        <li class="breadcrumb-item">{% trans %}Tools{% endtrans %}</li>
+        <li class="breadcrumb-item" aria-current="page">{% trans %}Zone Import{% endtrans %}</li>
+    </ol>
+</nav>
+
+{% if result is defined and result %}
+{# Import results #}
+<div class="card shadow-sm mb-4">
+    <div class="card-header py-3">
+        <strong><i class="bi bi-check-circle me-2"></i>{% trans %}Import Results{% endtrans %}</strong>
+    </div>
+    <div class="card-body">
+        {% if fail_count == 0 and (skip_count is not defined or skip_count == 0) %}
+        <div class="alert alert-success bg-success bg-opacity-10 py-2 border border-success small">
+            <i class="bi bi-check-circle-fill me-2 text-success"></i>
+            <strong class="text-success">{% trans %}Success:{% endtrans %}</strong>
+            {% trans %}Import completed successfully.{% endtrans %}
+            {{ success_count }} {% trans %}records imported.{% endtrans %}
+        </div>
+        {% elseif fail_count == 0 %}
+        <div class="alert alert-success bg-success bg-opacity-10 py-2 border border-success small">
+            <i class="bi bi-check-circle-fill me-2 text-success"></i>
+            <strong class="text-success">{% trans %}Success:{% endtrans %}</strong>
+            {{ success_count }} {% trans %}records imported,{% endtrans %}
+            {{ skip_count }} {% trans %}records skipped (duplicates).{% endtrans %}
+        </div>
+        {% else %}
+        <div class="alert alert-warning bg-warning bg-opacity-10 py-2 border border-warning small">
+            <i class="bi bi-exclamation-triangle-fill me-2 text-warning"></i>
+            <strong class="text-warning">{% trans %}Warning:{% endtrans %}</strong>
+            {{ success_count }} {% trans %}records imported,{% endtrans %}
+            {% if skip_count is defined and skip_count > 0 %}
+            {{ skip_count }} {% trans %}records skipped (duplicates),{% endtrans %}
+            {% endif %}
+            {{ fail_count }} {% trans %}records failed.{% endtrans %}
+        </div>
+        {% endif %}
+        <a href="{{ base_url_prefix }}/zones/{{ zone_id }}/edit" class="btn btn-outline-primary btn-sm">
+            <i class="bi bi-pencil me-1"></i>{% trans %}Edit zone{% endtrans %}
+        </a>
+        <a href="{{ base_url_prefix }}/tools/zone-import" class="btn btn-outline-secondary btn-sm">
+            <i class="bi bi-cloud-arrow-down me-1 text-secondary"></i>{% trans %}Import another zone{% endtrans %}
+        </a>
+    </div>
+</div>
+
+{% elseif preview is defined and preview %}
+{# Preview step #}
+<div class="card shadow-sm mb-4">
+    <div class="card-header py-3">
+        <strong><i class="bi bi-eye me-2"></i>{% trans %}Import Preview{% endtrans %}</strong>
+        <span class="badge bg-primary ms-2">{{ record_count }} {% trans %}records{% endtrans %}</span>
+    </div>
+    <div class="card-body">
+        {% if warnings is defined and warnings|length > 0 %}
+        <div class="alert alert-warning">
+            <strong><i class="bi bi-exclamation-triangle me-2"></i>{% trans %}Warnings:{% endtrans %}</strong>
+            <ul class="mb-0 mt-1">
+                {% for warning in warnings %}
+                <li>{{ warning }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        <div class="mb-3">
+            <strong>{% trans %}File:{% endtrans %}</strong> {{ filename }}
+            {% if origin %}<br><strong>{% trans %}Zone:{% endtrans %}</strong> {{ origin }}{% endif %}
+        </div>
+
+        <div class="table-responsive">
+            <table class="table table-sm table-striped">
+                <thead>
+                    <tr>
+                        <th>{% trans %}Name{% endtrans %}</th>
+                        <th>{% trans %}Type{% endtrans %}</th>
+                        <th>{% trans %}Content{% endtrans %}</th>
+                        <th>{% trans %}TTL{% endtrans %}</th>
+                        <th>{% trans %}Priority{% endtrans %}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for record in records %}
+                    <tr>
+                        <td><code>{{ record.name }}</code></td>
+                        <td><span class="badge {{ record_type_class(record.type) }}">{{ record.type }}</span></td>
+                        <td class="text-break" style="max-width: 400px">{{ record.content }}</td>
+                        <td>{{ record.ttl }}</td>
+                        <td>{{ record.priority }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <form method="post" action="{{ base_url_prefix }}/tools/zone-import/execute">
+            <input type="hidden" name="_token" value="{{ csrf_token }}">
+            <input type="hidden" name="import_mode" value="{{ import_mode }}">
+            <input type="hidden" name="existing_zone_id" value="{{ existing_zone_id }}">
+
+            {% if import_mode == 'existing' %}
+            <div class="row mb-3">
+                <div class="col-md-4">
+                    <label class="form-label">{% trans %}Target zone{% endtrans %}</label>
+                    <div class="form-control form-control-sm bg-light">
+                        <i class="bi bi-hdd me-1"></i>{{ existing_zone_name is defined ? existing_zone_name : '' }}
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <label for="conflict_strategy" class="form-label">{% trans %}Conflict strategy{% endtrans %}</label>
+                    <select class="form-select form-select-sm" id="conflict_strategy" name="conflict_strategy">
+                        <option value="skip">{% trans %}Skip duplicates{% endtrans %}</option>
+                        <option value="replace">{% trans %}Replace matching records{% endtrans %}</option>
+                        <option value="add_all">{% trans %}Add all records{% endtrans %}</option>
+                    </select>
+                </div>
+            </div>
+            {% else %}
+            <div class="row mb-3">
+                <div class="col-md-4">
+                    <label for="zone_name" class="form-label">{% trans %}Zone name{% endtrans %}</label>
+                    <input type="text" class="form-control form-control-sm" id="zone_name" name="zone_name" value="{{ origin }}" required>
+                </div>
+                <div class="col-md-3">
+                    <label for="zone_type" class="form-label">{% trans %}Zone type{% endtrans %}</label>
+                    <select class="form-select form-select-sm" id="zone_type" name="zone_type">
+                        <option value="MASTER">{% trans %}Master{% endtrans %}</option>
+                        <option value="NATIVE">{% trans %}Native{% endtrans %}</option>
+                    </select>
+                </div>
+            </div>
+            {% if group_owner_allowed is defined and group_owner_allowed and available_groups is defined and available_groups is not empty %}
+            <div class="mb-3">
+                <label class="form-label">
+                    {% trans %}Group ownership{% endtrans %}
+                    {% if user_owner_allowed is defined and not user_owner_allowed %} <span class="text-danger">*</span>{% endif %}
+                </label>
+                <div class="border rounded p-2" style="max-height: 160px; overflow-y: auto;">
+                    {% for group in available_groups %}
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" name="groups[]" id="import_group_{{ group.id }}" value="{{ group.id }}">
+                        <label class="form-check-label" for="import_group_{{ group.id }}">
+                            {{ group.name }}{% if group.description %} <small class="text-muted">{{ group.description }}</small>{% endif %}
+                        </label>
+                    </div>
+                    {% endfor %}
+                </div>
+                <small class="text-muted">
+                    {% if user_owner_allowed is defined and not user_owner_allowed %}
+                    {% trans %}Required: select at least one group.{% endtrans %}
+                    {% else %}
+                    {% trans %}Optional: select one or more groups.{% endtrans %}
+                    {% endif %}
+                </small>
+                {% if user_owner_allowed is defined and user_owner_allowed %}
+                <div class="form-check mt-2">
+                    <input class="form-check-input" type="checkbox" id="no_user_owner" name="no_user_owner" value="1">
+                    <label class="form-check-label" for="no_user_owner">
+                        {% trans %}No user owner — zone is owned only by the selected groups{% endtrans %}
+                    </label>
+                </div>
+                {% endif %}
+            </div>
+            {% endif %}
+            {% endif %}
+
+            <button type="submit" class="btn btn-primary btn-sm">
+                <i class="bi bi-check-circle me-1 text-white"></i>{% trans %}Confirm import{% endtrans %}
+            </button>
+            <a href="{{ base_url_prefix }}/tools/zone-import" class="btn btn-outline-secondary btn-sm">
+                <i class="bi bi-x-circle me-1"></i>{% trans %}Cancel{% endtrans %}
+            </a>
+        </form>
+    </div>
+</div>
+
+{% else %}
+{# Upload form #}
+<div class="row">
+    <div class="col-md-8">
+        <div class="card shadow-sm mb-4">
+            <div class="card-header py-3">
+                <strong><i class="bi bi-cloud-arrow-down me-2"></i>{% trans %}Import Zone File{% endtrans %}</strong>
+            </div>
+            <div class="card-body">
+                <form method="post" action="{{ base_url_prefix }}/tools/zone-import" enctype="multipart/form-data">
+                    <input type="hidden" name="_token" value="{{ csrf_token }}">
+
+                    <div class="mb-3">
+                        <label for="zone_file" class="form-label">{% trans %}Zone file{% endtrans %} <span class="text-danger">*</span></label>
+                        <input type="file" class="form-control form-control-sm" id="zone_file" name="zone_file" accept=".zone,.txt,.db" required>
+                        <div class="form-text">{% trans %}Standard BIND zone file format. Max size:{% endtrans %} {{ max_file_size_human }}</div>
+                    </div>
+
+                    {% if target_zone_id > 0 %}
+                    <div class="mb-3">
+                        <label class="form-label">{% trans %}Target zone{% endtrans %}</label>
+                        <div class="form-control form-control-sm bg-light">
+                            <i class="bi bi-hdd me-1"></i>{{ target_zone_name }}
+                        </div>
+                        <input type="hidden" name="import_mode" value="existing">
+                        <input type="hidden" name="existing_zone_id" value="{{ target_zone_id }}">
+                    </div>
+                    {% endif %}
+
+                    <button type="submit" class="btn btn-primary btn-sm">
+                        <i class="bi bi-upload me-1 text-white"></i>{% trans %}Upload and preview{% endtrans %}
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-4">
+        <div class="card shadow-sm mb-4">
+            <div class="card-header py-3">
+                <strong><i class="bi bi-info-circle me-2"></i>{% trans %}Supported formats{% endtrans %}</strong>
+            </div>
+            <div class="card-body">
+                <ul class="list-unstyled mb-0">
+                    <li><i class="bi bi-check text-success me-1"></i>{% trans %}Standard BIND zone files{% endtrans %}</li>
+                    <li><i class="bi bi-check text-success me-1"></i>{% trans %}Cloudflare zone exports{% endtrans %}</li>
+                    <li><i class="bi bi-check text-success me-1"></i>{% trans %}$ORIGIN and $TTL directives{% endtrans %}</li>
+                    <li><i class="bi bi-check text-success me-1"></i>{% trans %}Multi-line records{% endtrans %}</li>
+                    <li><i class="bi bi-check text-success me-1"></i>{% trans %}IDN domain names{% endtrans %}</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}

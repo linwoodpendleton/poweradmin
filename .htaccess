@@ -1,0 +1,72 @@
+# Poweradmin URL Rewriting Rules
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Subfolder Deployment Support
+    # For root folder deployment (default): Leave commented or set to /
+    # For subfolder deployment: Uncomment and set to your subfolder path
+    # Example: RewriteBase /poweradmin
+    # RewriteBase /
+
+    # Ensure HTTP Authorization header is forwarded
+    RewriteCond %{HTTP:Authorization} .
+    RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+    # Disable rewriting for existing files and directories
+    RewriteCond %{REQUEST_FILENAME} -f [OR]
+    RewriteCond %{REQUEST_FILENAME} -d
+    RewriteRule ^ - [L]
+
+    # Single catch-all rule - let Symfony Router handle all routing
+    RewriteRule ^(.*)$ index.php [QSA,L]
+</IfModule>
+
+# Protect the .htaccess file
+<Files .htaccess>
+    Order Allow,Deny
+    Deny from all
+</Files>
+
+# Prevent directory listing
+Options -Indexes
+
+# Set default character set
+AddDefaultCharset UTF-8
+
+# Security: Allow access to Bootstrap CSS/JS and Bootstrap Icons
+<Files ~ "^vendor/twbs/(bootstrap|bootstrap-icons)/.*\.(css|js|woff|woff2|ttf|eot|svg)$">
+    Order Allow,Deny
+    Allow from all
+</Files>
+
+# Security: Deny access to sensitive directories
+<IfModule mod_rewrite.c>
+    # Allow Bootstrap files before general vendor blocking
+    RewriteCond %{REQUEST_URI} !^/vendor/twbs/(bootstrap|bootstrap-icons)/
+    # Block access to sensitive directories
+    RewriteRule ^(config|lib|tests|vendor)/ - [F,L]
+</IfModule>
+
+# Security: Deny access to hidden files and directories
+<Files ~ "^\..*">
+    Order Allow,Deny
+    Deny from all
+</Files>
+
+# Security: Deny access to sensitive file types
+<Files ~ "\.(sql|md|log|yaml|yml)$">
+    Order Allow,Deny
+    Deny from all
+</Files>
+
+# Enable CORS for API endpoints
+<IfModule mod_headers.c>
+    <FilesMatch "^index\.php$">
+        SetEnvIf Request_URI "/api/" CORS=true
+        Header set Access-Control-Allow-Origin "*" env=CORS
+        Header set Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS" env=CORS
+        Header set Access-Control-Allow-Headers "Content-Type, Authorization, X-API-Key" env=CORS
+        Header set Access-Control-Max-Age "3600" env=CORS
+    </FilesMatch>
+</IfModule>

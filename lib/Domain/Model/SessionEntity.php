@@ -4,7 +4,7 @@
  *  See <https://www.poweradmin.org> for more details.
  *
  *  Copyright 2007-2010 Rejo Zenger <rejo@zenger.nl>
- *  Copyright 2010-2024 Poweradmin Development Team
+ *  Copyright 2010-2025 Poweradmin Development Team
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -22,20 +22,24 @@
 
 namespace Poweradmin\Domain\Model;
 
-class SessionEntity {
+class SessionEntity
+{
     private string $message;
     private string $type;
 
-    public function __construct(string $message, string $type) {
+    public function __construct(string $message, string $type)
+    {
         $this->message = $message;
         $this->type = $type;
     }
 
-    public function getMessage(): string {
+    public function getMessage(): string
+    {
         return $this->message;
     }
 
-    public function getType(): string {
+    public function getType(): string
+    {
         return $this->type;
     }
 }

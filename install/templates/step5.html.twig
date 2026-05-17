@@ -1,0 +1,182 @@
+{% extends 'base.html.twig' %}
+
+{% block step_description %}{% trans %}Setup account and nameservers{% endtrans %}{% endblock %}
+
+{% block content %}
+    <div class="card shadow-sm mb-4">
+        <div class="card-header bg-secondary text-white">
+            {% trans %}Step{% endtrans %} {{ current_step }}: {% trans %}Setup account and name servers{% endtrans %}
+        </div>
+        <div class="card-body">
+            <div class="alert alert-info py-1 mb-2 small">
+                <strong>{% trans %}Configuration:{% endtrans %}</strong> {% trans %}Now we will gather all details for the configuration itself.{% endtrans %}
+            </div>
+            
+            {% if db_error is defined and db_error %}
+                <div class="alert alert-danger py-2 mb-3">
+                    <h5>{{ db_error.title }}</h5>
+                    {% if db_error.message matches '/foreign key|constraint|referenced/i' %}
+                        <div class="border-start border-danger border-4 ps-2">
+                            <p>{{ db_error.message }}</p>
+                        </div>
+                    {% else %}
+                        <p>{{ db_error.message }}</p>
+                    {% endif %}
+                    
+                    {% if db_error.suggestions %}
+                        {{ db_error.suggestions|raw }}
+                    {% endif %}
+                </div>
+            {% endif %}
+            
+            {% if messages is defined %}
+                {% if messages.pdns_warning is defined %}
+                    <div class="alert alert-warning py-2 mb-3">
+                        {{ messages.pdns_warning|raw }}
+                    </div>
+                {% endif %}
+                
+                {% if messages.db_success is defined %}
+                    <div class="alert alert-secondary py-1 mb-2 small">
+                        {{ messages.db_success }}
+                    </div>
+                {% endif %}
+            {% endif %}
+
+            <form class="needs-validation" method="post" novalidate>
+                <input type="hidden" name="install_token" value="{{ install_token }}">
+
+                {% if db_type != 'sqlite' %}
+                <div class="card mb-3">
+                    <div class="card-header">
+                        <strong>{% trans %}Database User{% endtrans %}</strong>
+                    </div>
+                    <div class="card-body">
+                        {% if pdns_api_backend is defined and pdns_api_backend == 'api' %}
+                            <div class="alert alert-info py-1 mb-2 small">
+                                {% trans %}Poweradmin keeps its own tables (users, permissions, zone metadata) in the configured database even when the PowerDNS API backend is selected. These credentials are for that database, not for PowerDNS.{% endtrans %}
+                            </div>
+                        {% endif %}
+                        <div class="row mb-3">
+                            <label for="pa_db_user" class="col-md-2 col-form-label col-form-label-sm">{% trans %}Username{% endtrans %}</label>
+                            <div class="col-md-4">
+                                <input id="pa_db_user" class="form-control form-control-sm" type="text" name="pa_db_user" value="{{ pa_db_user }}" required>
+                                <div class="invalid-feedback">{% trans %}Provide the user name{% endtrans %}</div>
+                            </div>
+                            <div class="col-md-6">
+                                <span class="form-text small">{% trans %}Poweradmin database username with restricted access. Not for web UI login.{% endtrans %}</span>
+                            </div>
+                        </div>
+
+                        <div class="row mb-3">
+                            <label for="pa_db_pass" class="col-md-2 col-form-label col-form-label-sm">{% trans %}Password{% endtrans %}</label>
+                            <div class="col-md-4">
+                                <div class="input-group input-group-sm">
+                                    <input id="pa_db_pass" class="form-control form-control-sm" type="password" name="pa_db_pass" value="{{ pa_db_pass }}" autocomplete="off" required>
+                                    <button class="btn btn-sm btn-outline-secondary" type="button" onclick="showPassword('pa_db_pass', 'eye1')"><i class="bi bi-eye-fill" id="eye1"></i></button>
+                                    <div class="invalid-feedback">{% trans %}Provide the user password{% endtrans %}</div>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <span class="form-text small">{% trans %}The password for this username.{% endtrans %}<br>
+                                <small class="text-muted">{% trans %}Avoid quotes, backslashes, and line breaks.{% endtrans %}</small></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+
+                <div class="card mb-3">
+                    <div class="card-header">
+                        <strong>{% trans %}DNS Settings{% endtrans %}</strong>
+                    </div>
+                    <div class="card-body">
+                        <div class="row mb-3">
+                            <label for="dns_hostmaster" class="col-md-2 col-form-label col-form-label-sm">{% trans %}Hostmaster{% endtrans %}</label>
+                            <div class="col-md-4">
+                                <input id="dns_hostmaster" class="form-control form-control-sm" type="text" name="dns_hostmaster" 
+                                       value="{{ dns_hostmaster }}" placeholder="hostmaster.example.net" required>
+                                <div class="invalid-feedback">{% trans %}Provide the DNS hostmaster{% endtrans %}</div>
+                            </div>
+                            <div class="col-md-6">
+                                <span class="form-text small">{% trans %}Default hostmaster for SOA records.{% endtrans %}</span>
+                            </div>
+                        </div>
+
+                        <div class="row mb-3">
+                            <label for="dns_ns1" class="col-md-2 col-form-label col-form-label-sm">{% trans %}Primary nameserver{% endtrans %}</label>
+                            <div class="col-md-4">
+                                <input id="dns_ns1" class="form-control form-control-sm" type="text" name="dns_ns1" value="{{ dns_ns1 }}"
+                                       placeholder="ns1.example.net" required>
+                                <div class="invalid-feedback">{% trans %}Provide the primary nameserver{% endtrans %}</div>
+                            </div>
+                            <div class="col-md-6">
+                                <span class="form-text small">{% trans %}Primary nameserver for new zones.{% endtrans %}</span>
+                            </div>
+                        </div>
+
+                        <div class="row mb-3">
+                            <label for="dns_ns2" class="col-md-2 col-form-label col-form-label-sm">{% trans %}Secondary nameserver{% endtrans %}</label>
+                            <div class="col-md-4">
+                                <input id="dns_ns2" class="form-control form-control-sm" type="text" name="dns_ns2" value="{{ dns_ns2 }}"
+                                       placeholder="ns2.example.net" required>
+                                <div class="invalid-feedback">{% trans %}Provide the secondary nameserver{% endtrans %}</div>
+                            </div>
+                            <div class="col-md-6">
+                                <span class="form-text small">{% trans %}Secondary nameserver for new zones.{% endtrans %}</span>
+                            </div>
+                        </div>
+
+                        <div class="row mb-3">
+                            <label for="dns_ns3" class="col-md-2 col-form-label col-form-label-sm">
+                                {% trans %}Tertiary Nameserver{% endtrans %} <span class="text-muted">({% trans %}optional{% endtrans %})</span>
+                            </label>
+                            <div class="col-md-4">
+                                <input id="dns_ns3" class="form-control form-control-sm" type="text" name="dns_ns3" value="{{ dns_ns3 }}"
+                                       placeholder="ns3.example.net">
+                            </div>
+                            <div class="col-md-6">
+                                <span class="form-text small">{% trans %}Optional tertiary nameserver for new zones.{% endtrans %}</span>
+                            </div>
+                        </div>
+
+                        <div class="row mb-3">
+                            <label for="dns_ns4" class="col-md-2 col-form-label col-form-label-sm">
+                                {% trans %}Quaternary Nameserver{% endtrans %} <span class="text-muted">({% trans %}optional{% endtrans %})</span>
+                            </label>
+                            <div class="col-md-4">
+                                <input id="dns_ns4" class="form-control form-control-sm" type="text" name="dns_ns4" value="{{ dns_ns4 }}"
+                                       placeholder="ns4.example.net">
+                            </div>
+                            <div class="col-md-6">
+                                <span class="form-text small">{% trans %}Optional quaternary nameserver for new zones.{% endtrans %}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mt-3">
+                    <input type="hidden" name="db_user" value="{{ db_user }}">
+                    <input type="hidden" name="db_pass" value="{{ db_pass }}">
+                    <input type="hidden" name="db_host" value="{{ db_host }}">
+                    <input type="hidden" name="db_port" value="{{ db_port }}">
+                    <input type="hidden" name="db_name" value="{{ db_name }}">
+                    <input type="hidden" name="db_type" value="{{ db_type }}">
+                    <input type="hidden" name="db_charset" value="{{ db_charset }}">
+                    <input type="hidden" name="db_collation" value="{{ db_collation }}">
+                    <input type="hidden" name="pa_pass" value="{{ pa_pass }}">
+                    <input type="hidden" name="pdns_db_name" value="{{ pdns_db_name }}">
+                    <input type="hidden" name="pdns_api_backend" value="{{ pdns_api_backend }}">
+                    <input type="hidden" name="pdns_api_url" value="{{ pdns_api_url }}">
+                    <input type="hidden" name="pdns_api_key" value="{{ pdns_api_key }}">
+                    <input type="hidden" name="pdns_api_server_name" value="{{ pdns_api_server_name }}">
+                    <input type="hidden" name="step" value="{{ next_step }}">
+                    <input type="hidden" name="language" value="{{ language }}">
+                    <div class="mt-4 text-center">
+                        <input type="submit" name="submit" class="btn btn-sm btn-primary" value="{% trans %}Continue to step{% endtrans %} {{ next_step }}">
+                    </div>
+                </div>
+            </form>
+        </div>
+    </div>
+{% endblock %}

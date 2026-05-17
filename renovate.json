@@ -1,0 +1,82 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "schedule": [
+    "after 9am and before 9pm"
+  ],
+  "timezone": "Europe/Vilnius",
+  "baseBranchPatterns": [
+    "develop",
+    "master",
+    "release/3.x",
+    "release/4.3.x"
+  ],
+  "constraints": {
+    "php": "<8.6"
+  },
+  "postUpdateOptions": [],
+  "packageRules": [
+    {
+      "description": "Dev dependencies - update composer.json version only, skip lock file and vendor",
+      "matchDepTypes": [
+        "require-dev"
+      ],
+      "groupName": "dev dependencies",
+      "skipArtifactsUpdate": true
+    },
+    {
+      "description": "Production dependencies - update composer files and vendor directory (no dev packages)",
+      "matchDepTypes": [
+        "require"
+      ],
+      "groupName": "production dependencies",
+      "postUpdateOptions": [
+        "composerUpdateNoDev"
+      ]
+    },
+    {
+      "description": "Only allow patch updates on stable branches",
+      "matchBaseBranches": [
+        "release/3.x",
+        "release/4.3.x"
+      ],
+      "matchUpdateTypes": [
+        "major",
+        "minor"
+      ],
+      "enabled": false
+    },
+    {
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "php"
+      ],
+      "allowedVersions": "8.2",
+      "description": "Pin PHP Docker image to 8.2.x"
+    },
+    {
+      "matchDatasources": [
+        "packagist"
+      ],
+      "matchPackageNames": [
+        "phpunit/phpunit"
+      ],
+      "allowedVersions": "<12.0",
+      "description": "PHPUnit 12+ requires PHP 8.3+"
+    },
+    {
+      "matchDatasources": [
+        "packagist"
+      ],
+      "allowedVersions": "<8.0",
+      "description": "Symfony 8.0 requires PHP 8.4+",
+      "matchPackageNames": [
+        "/^symfony//"
+      ]
+    }
+  ]
+}
