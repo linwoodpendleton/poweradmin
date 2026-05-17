@@ -81,4 +81,46 @@ class DbGeoRepository
         $stmt->execute($params);
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
+
+    /**
+     * Type-ahead search across geo_isps. Empty query returns the first N
+     * alphabetically — useful for "list all" on first focus. The query is
+     * matched substring-style (LIKE %q%) on the lowercase column so input is
+     * accent/case-insensitive.
+     *
+     * @return array<int, array{name:string}>
+     */
+    public function searchIsps(string $query = '', int $limit = 20): array
+    {
+        $params = [];
+        $sql = 'SELECT name FROM geo_isps';
+        $query = trim(mb_strtolower($query, 'UTF-8'));
+        if ($query !== '') {
+            $sql .= ' WHERE name_lower LIKE :q';
+            $params[':q'] = '%' . $query . '%';
+        }
+        $sql .= ' ORDER BY name_lower LIMIT ' . (int)$limit;
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute($params);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * Type-ahead search across geo_domains. Same semantics as searchIsps.
+     * @return array<int, array{name:string}>
+     */
+    public function searchDomains(string $query = '', int $limit = 20): array
+    {
+        $params = [];
+        $sql = 'SELECT name FROM geo_domains';
+        $query = trim(mb_strtolower($query, 'UTF-8'));
+        if ($query !== '') {
+            $sql .= ' WHERE name_lower LIKE :q';
+            $params[':q'] = '%' . $query . '%';
+        }
+        $sql .= ' ORDER BY name_lower LIMIT ' . (int)$limit;
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute($params);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
 }

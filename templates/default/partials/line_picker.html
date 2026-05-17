@@ -1,0 +1,91 @@
+{# Reusable Line picker for the Add/Edit Record forms.
+
+   Inputs (set via `with`):
+     index : row index (used in the records[N][...] name prefix)
+     rec   : optional restored record state, may carry .line_type / .line_value
+
+   Submits two fields:
+     records[N][line_type]   one of: default | continent | country | isp | domain | connection
+     records[N][line_value]  context-dependent payload, e.g.
+                              continent: "AS"
+                              country:   "CN" or "CN/GD" or "CN/GD/1809858"
+                              isp:       "Cloudflare"
+                              domain:    "google.com"
+                              connection: "Cable/DSL" | "Cellular" | ...
+
+   The cascading dropdowns are populated lazily via the AJAX endpoint
+   /ajax/geo-list (kind = continents / countries / regions / cities /
+   isps / domains / connection_types).
+#}
+{% set selectedLine = rec.line_type | default('default') %}
+<div class="line-picker" data-index="{{ index }}">
+    <select class="form-select form-select-sm line-type-select" name="records[{{ index }}][line_type]"
+            onchange="LinePicker.onTypeChange(this)">
+        <option value="default"    {% if selectedLine == 'default'    %}selected{% endif %}>默认 / Default</option>
+        <option value="continent"  {% if selectedLine == 'continent'  %}selected{% endif %}>大洲 / Continent</option>
+        <option value="country"    {% if selectedLine == 'country'    %}selected{% endif %}>国家 / Country → Region → City</option>
+        <option value="isp"        {% if selectedLine == 'isp'        %}selected{% endif %}>运营商 / ISP</option>
+        <option value="domain"     {% if selectedLine == 'domain'     %}selected{% endif %}>域名 / Domain</option>
+        <option value="connection" {% if selectedLine == 'connection' %}selected{% endif %}>连接类型 / Connection</option>
+    </select>
+
+    <input type="hidden" class="line-value" name="records[{{ index }}][line_value]" value="{{ rec.line_value | default('') }}">
+
+    <div class="line-widgets mt-1">
+        <!-- Continent -->
+        <div class="line-widget" data-kind="continent" style="display:none;">
+            <select class="form-select form-select-sm line-continent-select"
+                    onchange="LinePicker.onContinentChange(this)">
+                <option value="">— continent —</option>
+            </select>
+        </div>
+
+        <!-- Country / Region / City cascade -->
+        <div class="line-widget" data-kind="country" style="display:none;">
+            <select class="form-select form-select-sm line-country-select mb-1"
+                    onchange="LinePicker.onCountryChange(this)">
+                <option value="">— country —</option>
+            </select>
+            <select class="form-select form-select-sm line-region-select mb-1"
+                    onchange="LinePicker.onRegionChange(this)" style="display:none;">
+                <option value="">— region / state (optional) —</option>
+            </select>
+            <select class="form-select form-select-sm line-city-select"
+                    onchange="LinePicker.onCityChange(this)" style="display:none;">
+                <option value="">— city (optional) —</option>
+            </select>
+        </div>
+
+        <!-- ISP type-ahead -->
+        <div class="line-widget" data-kind="isp" style="display:none;">
+            <input type="text" class="form-control form-control-sm line-typeahead-input"
+                   data-source="isps"
+                   list="isp-suggest-{{ index }}"
+                   placeholder="Type ISP name… e.g. Cloudflare / Google / China Telecom"
+                   autocomplete="off"
+                   oninput="LinePicker.onTypeaheadInput(this)">
+            <datalist id="isp-suggest-{{ index }}"></datalist>
+            <small class="text-muted">Substring match. "google" → Google, Google Cloud, Google Fiber, …</small>
+        </div>
+
+        <!-- Domain type-ahead -->
+        <div class="line-widget" data-kind="domain" style="display:none;">
+            <input type="text" class="form-control form-control-sm line-typeahead-input"
+                   data-source="domains"
+                   list="domain-suggest-{{ index }}"
+                   placeholder="Type 2LD… e.g. google → google.com, google.sg, …"
+                   autocomplete="off"
+                   oninput="LinePicker.onTypeaheadInput(this)">
+            <datalist id="domain-suggest-{{ index }}"></datalist>
+            <small class="text-muted">Substring match on second-level domain.</small>
+        </div>
+
+        <!-- Connection type -->
+        <div class="line-widget" data-kind="connection" style="display:none;">
+            <select class="form-select form-select-sm line-connection-select"
+                    onchange="LinePicker.onConnectionChange(this)">
+                <option value="">— connection —</option>
+            </select>
+        </div>
+    </div>
+</div>

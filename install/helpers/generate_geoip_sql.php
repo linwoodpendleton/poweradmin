@@ -7,17 +7,22 @@
  *   php install/helpers/generate_geoip_sql.php \
  *       --en /path/to/GeoIP2-City-Locations-en.csv \
  *       --zh /path/to/GeoIP2-City-Locations-zh-CN.csv \
+ *       --isp /path/to/GeoIP2-ISP-Blocks-IPv4.csv \
+ *       --domain /path/to/GeoIP2-Domain-Blocks-IPv4.csv \
  *       --out sql/poweradmin-mysql-geoip-data.sql
  *
- * --zh is optional; without it the name_zh column is left NULL.
+ * --en is required (City Locations English). All others are optional:
+ *   --zh produces name_zh columns.
+ *   --isp dedupes the ISP column from GeoIP2-ISP-Blocks into geo_isps
+ *         (~75k rows) for the Line=ISP type-ahead picker.
+ *   --domain does the same for GeoIP2-Domain-Blocks into geo_domains.
  *
- * The script streams the EN CSV row-by-row to keep memory bounded around
- * ~50MB even with 130k+ rows. ZH names are loaded into a compact lookup
- * indexed by geoname_id.
+ * The script streams the large CSVs row-by-row to keep memory bounded
+ * around ~50MB. The ZH lookup is compact (geoname_id → 4-tuple).
  *
  * Output tables (must already exist; created by
  * sql/poweradmin-mysql-geoip-routing.sql):
- *   geo_continents, geo_countries, geo_regions, geo_cities
+ *   geo_continents, geo_countries, geo_regions, geo_cities, geo_isps, geo_domains
  */
 
 declare(strict_types=1);
@@ -26,17 +31,19 @@ const BATCH = 500;
 
 function parseArgs(array $argv): array
 {
-    $opts = ['en' => null, 'zh' => null, 'out' => null];
+    $opts = ['en' => null, 'zh' => null, 'isp' => null, 'domain' => null, 'out' => null];
     for ($i = 1; $i < count($argv); $i++) {
         $a = $argv[$i];
         $next = $argv[$i + 1] ?? null;
         switch ($a) {
-            case '--en':  $opts['en']  = $next; $i++; break;
-            case '--zh':  $opts['zh']  = $next; $i++; break;
-            case '--out': $opts['out'] = $next; $i++; break;
+            case '--en':     $opts['en']     = $next; $i++; break;
+            case '--zh':     $opts['zh']     = $next; $i++; break;
+            case '--isp':    $opts['isp']    = $next; $i++; break;
+            case '--domain': $opts['domain'] = $next; $i++; break;
+            case '--out':    $opts['out']    = $next; $i++; break;
             case '-h':
             case '--help':
-                fwrite(STDERR, file_get_contents(__FILE__, false, null, 0, 1500));
+                fwrite(STDERR, file_get_contents(__FILE__, false, null, 0, 1800));
                 exit(0);
             default:
                 fwrite(STDERR, "Unknown arg: $a\n");
@@ -47,7 +54,7 @@ function parseArgs(array $argv): array
         fwrite(STDERR, "Missing required --en or --out.\n");
         exit(2);
     }
-    foreach (['en', 'zh'] as $k) {
+    foreach (['en', 'zh', 'isp', 'domain'] as $k) {
         if ($opts[$k] !== null && !is_readable($opts[$k])) {
             fwrite(STDERR, "Cannot read --$k file: {$opts[$k]}\n");
             exit(2);
@@ -205,11 +212,63 @@ $wCountries->flush();
 $wRegions->flush();
 $wCities->flush();
 
+// ---- ISP / Domain dedup tables (optional inputs) -------------------------
+function emitDistinctNames($out, string $table, string $csvPath, int $column): int
+{
+    $fh = fopen($csvPath, 'r');
+    if (!$fh) { fwrite(STDERR, "Cannot open $csvPath\n"); return 0; }
+    // First row is header; skip.
+    fgetcsv($fh);
+    $seen = [];
+    $skipped = 0;
+    while (($r = fgetcsv($fh)) !== false) {
+        $name = $r[$column] ?? '';
+        if ($name === '') continue;
+        // MaxMind ISP/Domain feeds occasionally contain double-encoded or
+        // truncated multibyte sequences. MySQL refuses these in utf8mb4
+        // columns, so drop them at generation time.
+        if (!mb_check_encoding($name, 'UTF-8')) {
+            $skipped++;
+            continue;
+        }
+        $lower = mb_strtolower($name, 'UTF-8');
+        if (isset($seen[$lower])) continue;
+        $seen[$lower] = $name;
+    }
+    fclose($fh);
+    if ($skipped > 0) {
+        fwrite(STDERR, "  skipped $skipped rows with invalid UTF-8\n");
+    }
+    ksort($seen);
+
+    $w = new BatchWriter($out, $table, ['name', 'name_lower']);
+    foreach ($seen as $lower => $name) {
+        $w->add([q($name), q($lower)]);
+    }
+    $w->flush();
+    return count($seen);
+}
+
+$ispCount = 0;
+if ($opts['isp']) {
+    fwrite(STDERR, "Building geo_isps from {$opts['isp']}\n");
+    // ISP blocks CSV: network,isp,organization,asn,aso,mcc,mnc — column index 1
+    $ispCount = emitDistinctNames($out, 'geo_isps', $opts['isp'], 1);
+}
+
+$domainCount = 0;
+if ($opts['domain']) {
+    fwrite(STDERR, "Building geo_domains from {$opts['domain']}\n");
+    // Domain blocks CSV: network,domain — column index 1
+    $domainCount = emitDistinctNames($out, 'geo_domains', $opts['domain'], 1);
+}
+
 fwrite($out, "\nCOMMIT;\n");
 fclose($out);
 
 fwrite(STDERR, sprintf(
-    "Wrote %s — %d continents, %d countries, %d regions, %d cities\n",
+    "Wrote %s — %d continents, %d countries, %d regions, %d cities, %d isps, %d domains\n",
     $opts['out'],
-    count($seenContinent), count($seenCountry), count($seenRegion), $cityCount
+    count($seenContinent), count($seenCountry), count($seenRegion), $cityCount,
+    $ispCount, $domainCount
 ));

@@ -46,6 +46,29 @@ CREATE TABLE IF NOT EXISTS `geo_cities` (
   KEY `idx_country_region` (`country_iso`, `region_code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Distinct ISP names extracted from GeoIP2-ISP-Blocks-IPv4.csv. ~75k rows.
+-- Powers the type-ahead picker on the Line=ISP form field.
+CREATE TABLE IF NOT EXISTS `geo_isps` (
+  `id`         INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `name`       VARCHAR(255) NOT NULL,
+  `name_lower` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_name` (`name_lower`),
+  KEY `idx_search` (`name_lower`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Distinct second-level domains from GeoIP2-Domain-Blocks-IPv4.csv. ~75k rows.
+-- Powers the type-ahead picker on the Line=Domain form field (fuzzy match
+-- against the user's input — e.g. "google" → google.com, google.sg, …).
+CREATE TABLE IF NOT EXISTS `geo_domains` (
+  `id`         INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `name`       VARCHAR(255) NOT NULL,
+  `name_lower` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_name` (`name_lower`),
+  KEY `idx_search` (`name_lower`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `geo_routing_rules` (
   `id`               INT UNSIGNED NOT NULL AUTO_INCREMENT,
   `domain_id`        INT NOT NULL,

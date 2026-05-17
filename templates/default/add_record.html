@@ -96,24 +96,8 @@
                                     {% endfor %}
                                 </select>
                             </td>
-                            <td style="min-width: 220px;">
-                                <select class="form-select form-select-sm line-type-select" name="records[0][line_type]"
-                                        onchange="updateLineValueUI(this)">
-                                    <option value="default" selected>默认 (Default)</option>
-                                    <option value="telecom">电信 (China Telecom)</option>
-                                    <option value="unicom">联通 (China Unicom)</option>
-                                    <option value="mobile">移动 (China Mobile)</option>
-                                    <option value="other_isp">其他运营商 (Other ISP)</option>
-                                    <option value="region">大区 (Continent)</option>
-                                    <option value="country">国家 (Country)</option>
-                                    <option value="province">境内 (CN Province)</option>
-                                    <option value="connection">接入类型 (Connection)</option>
-                                    <option value="global">全球 (Global)</option>
-                                </select>
-                                <div class="line-value-wrapper mt-1" style="display: none;">
-                                    <input type="text" class="form-control form-control-sm line-value-input"
-                                           name="records[0][line_value]" placeholder="">
-                                </div>
+                            <td style="min-width: 260px;">
+                                {% include 'partials/line_picker.html' with {'index': 0, 'rec': null} %}
                             </td>
                             <td>
                                 <div class="content-container">
@@ -167,16 +151,8 @@
                                     {% endfor %}
                                 </select>
                             </td>
-                            <td style="min-width: 220px;">
-                                <select class="form-select form-select-sm line-type-select" name="records[{{ loop.index }}][line_type]" onchange="updateLineValueUI(this)">
-                                    {% set selectedLine = rec.line_type | default('default') %}
-                                    {% for opt in [{'v':'default','l':'默认 (Default)'},{'v':'telecom','l':'电信 (China Telecom)'},{'v':'unicom','l':'联通 (China Unicom)'},{'v':'mobile','l':'移动 (China Mobile)'},{'v':'other_isp','l':'其他运营商 (Other ISP)'},{'v':'region','l':'大区 (Continent)'},{'v':'country','l':'国家 (Country)'},{'v':'province','l':'境内 (CN Province)'},{'v':'connection','l':'接入类型 (Connection)'},{'v':'global','l':'全球 (Global)'}] %}
-                                    <option value="{{ opt.v }}" {% if opt.v == selectedLine %}selected{% endif %}>{{ opt.l }}</option>
-                                    {% endfor %}
-                                </select>
-                                <div class="line-value-wrapper mt-1" style="display: none;">
-                                    <input type="text" class="form-control form-control-sm line-value-input" name="records[{{ loop.index }}][line_value]" value="{{ rec.line_value | default('') }}" placeholder="">
-                                </div>
+                            <td style="min-width: 260px;">
+                                {% include 'partials/line_picker.html' with {'index': loop.index, 'rec': rec} %}
                             </td>
                             <td>
                                 <div class="content-container">
@@ -317,6 +293,25 @@
 
         tableBody.appendChild(newRow);
         updateDeleteButtons();
+
+        // Initialize the line picker for the new row (datalist IDs must be
+        // unique per row; rewrite them based on the new index).
+        const newPicker = newRow.querySelector('.line-picker');
+        if (newPicker) {
+            newPicker.dataset.index = newRowIndex;
+            newPicker.querySelectorAll('datalist').forEach(dl => {
+                const newId = dl.id.replace(/-\d+$/, '-' + newRowIndex);
+                dl.id = newId;
+            });
+            newPicker.querySelectorAll('input[list]').forEach(inp => {
+                inp.setAttribute('list', inp.getAttribute('list').replace(/-\d+$/, '-' + newRowIndex));
+            });
+            // Reset the cloned selections, then boot.
+            newPicker.querySelector('.line-value').value = '';
+            newPicker.querySelectorAll('select').forEach(s => { if (s !== newPicker.querySelector('.line-type-select')) s.selectedIndex = 0; });
+            newPicker.querySelectorAll('input[type="text"]').forEach(i => { i.value = ''; });
+            LinePicker.bootRow(newPicker);
+        }
 
         // Initialize the PTR checkbox visibility for the new row
         const typeSelect = newRow.querySelector('.record-type-select');
@@ -462,32 +457,171 @@
 
         setupRecordWarningListeners();
 
-        // Initialise the line-value input visibility for any pre-rendered rows.
-        document.querySelectorAll('.line-type-select').forEach(updateLineValueUI);
+        // Initialise the line widgets for any pre-rendered rows.
+        document.querySelectorAll('.line-picker').forEach(LinePicker.bootRow);
     });
 
-    // Toggle the secondary line_value input based on the picked line type.
-    // Default/global/telecom/unicom/mobile need no value; the rest do (text or
-    // restricted set). Placeholder text gives a hint of the expected format.
-    function updateLineValueUI(select) {
-        const row = select.closest('tr');
-        if (!row) return;
-        const wrapper = row.querySelector('.line-value-wrapper');
-        const input   = row.querySelector('.line-value-input');
-        if (!wrapper || !input) return;
+    /**
+     * LinePicker — cascading "Line" picker for DNSPod-style GeoIP routing.
+     *
+     * The PHP form posts records[N][line_type] and records[N][line_value]
+     * for each row. line_value is a slash-separated string whose shape
+     * depends on line_type:
+     *   continent  : "AS"
+     *   country    : "CN" or "CN/GD" or "CN/GD/1809858"
+     *   isp/domain : raw substring the user typed
+     *   connection : enum value
+     *
+     * We populate the dropdowns lazily from /ajax/geo-list and rebuild
+     * the hidden line_value input every time the user changes any sub-field.
+     */
+    const LinePicker = (() => {
+        const AJAX = (qs) => fetch('{{ base_url_prefix }}/ajax/geo-list?' + qs, {credentials:'same-origin'})
+            .then(r => r.ok ? r.json() : []).catch(() => []);
 
-        const HINTS = {
-            other_isp:  'e.g. amazon / google / cloudflare',
-            region:     'AS / EU / NA / SA / AF / OC',
-            country:    'ISO code, e.g. JP / US / DE',
-            province:   'CN region code, e.g. GD / BJ / SH',
-            connection: 'Cable/DSL | Cellular | Corporate | Satellite',
-        };
-        const needsValue = HINTS.hasOwnProperty(select.value);
-        wrapper.style.display = needsValue ? 'block' : 'none';
-        input.placeholder = HINTS[select.value] || '';
-        if (!needsValue) input.value = '';
-    }
+        function picker(el) { return el.closest('.line-picker'); }
+        function setHidden(root, v) { root.querySelector('.line-value').value = v; }
+        function getHidden(root)   { return root.querySelector('.line-value').value; }
+        function showWidget(root, kind) {
+            root.querySelectorAll('.line-widget').forEach(w => {
+                w.style.display = (w.dataset.kind === kind) ? 'block' : 'none';
+            });
+        }
+
+        async function bootRow(root) {
+            // Single per-page cache for the continent / country lists since
+            // they're small and stable.
+            const type = root.querySelector('.line-type-select').value || 'default';
+            await ensurePopulated(root, type);
+            // Pre-select if line_value was supplied (edit mode).
+            const v = getHidden(root);
+            if (v && type === 'continent') {
+                root.querySelector('.line-continent-select').value = v;
+            } else if (v && type === 'country') {
+                const parts = v.split('/');
+                root.querySelector('.line-country-select').value = parts[0] || '';
+                if (parts[0]) {
+                    await loadRegions(root, parts[0]);
+                    root.querySelector('.line-region-select').value = parts[1] || '';
+                    if (parts[1]) {
+                        await loadCities(root, parts[0], parts[1]);
+                        root.querySelector('.line-city-select').value = parts[2] || '';
+                    }
+                }
+            } else if (v && (type === 'isp' || type === 'domain')) {
+                root.querySelector('.line-typeahead-input').value = v;
+            } else if (v && type === 'connection') {
+                root.querySelector('.line-connection-select').value = v;
+            }
+            showWidget(root, type);
+        }
+
+        function fill(sel, items, placeholder, valueKey) {
+            sel.innerHTML = '<option value="">' + placeholder + '</option>';
+            const vk = valueKey || 'value';
+            for (const it of items) {
+                const o = document.createElement('option');
+                o.value = it[vk];
+                o.textContent = it.label;
+                sel.appendChild(o);
+            }
+        }
+
+        async function ensurePopulated(root, type) {
+            if (type === 'continent') {
+                const sel = root.querySelector('.line-continent-select');
+                if (sel.options.length <= 1) {
+                    fill(sel, await AJAX('kind=continents'), '— continent —');
+                }
+            } else if (type === 'country') {
+                const sel = root.querySelector('.line-country-select');
+                if (sel.options.length <= 1) {
+                    fill(sel, await AJAX('kind=countries'), '— country —');
+                }
+            } else if (type === 'connection') {
+                const sel = root.querySelector('.line-connection-select');
+                if (sel.options.length <= 1) {
+                    fill(sel, await AJAX('kind=connection_types'), '— connection —');
+                }
+            }
+        }
+
+        async function loadRegions(root, country) {
+            const sel = root.querySelector('.line-region-select');
+            fill(sel, await AJAX('kind=regions&country=' + encodeURIComponent(country)), '— region / state (optional) —');
+            sel.style.display = 'block';
+            root.querySelector('.line-city-select').innerHTML = '<option value="">— city (optional) —</option>';
+            root.querySelector('.line-city-select').style.display = 'none';
+        }
+
+        async function loadCities(root, country, region) {
+            const sel = root.querySelector('.line-city-select');
+            fill(sel, await AJAX('kind=cities&country=' + encodeURIComponent(country) + '&region=' + encodeURIComponent(region)), '— city (optional) —');
+            sel.style.display = 'block';
+        }
+
+        function onTypeChange(select) {
+            const root = picker(select);
+            setHidden(root, '');
+            ensurePopulated(root, select.value).then(() => showWidget(root, select.value));
+        }
+
+        function onContinentChange(sel) { setHidden(picker(sel), sel.value); }
+
+        async function onCountryChange(sel) {
+            const root = picker(sel);
+            setHidden(root, sel.value);
+            if (sel.value) await loadRegions(root, sel.value);
+            else {
+                root.querySelector('.line-region-select').style.display = 'none';
+                root.querySelector('.line-city-select').style.display = 'none';
+            }
+        }
+
+        async function onRegionChange(sel) {
+            const root = picker(sel);
+            const country = root.querySelector('.line-country-select').value;
+            setHidden(root, sel.value ? `${country}/${sel.value}` : country);
+            if (sel.value) await loadCities(root, country, sel.value);
+            else root.querySelector('.line-city-select').style.display = 'none';
+        }
+
+        function onCityChange(sel) {
+            const root = picker(sel);
+            const country = root.querySelector('.line-country-select').value;
+            const region  = root.querySelector('.line-region-select').value;
+            const v = sel.value ? `${country}/${region}/${sel.value}` : (region ? `${country}/${region}` : country);
+            setHidden(root, v);
+        }
+
+        // Typeahead with 200ms debounce. Substring match server-side.
+        const debounceMap = new WeakMap();
+        function onTypeaheadInput(input) {
+            const root = picker(input);
+            setHidden(root, input.value.trim());
+            clearTimeout(debounceMap.get(input));
+            const t = setTimeout(async () => {
+                const kind = input.dataset.source;
+                const q = input.value.trim();
+                if (q.length < 1) return;
+                const items = await AJAX('kind=' + kind + '&q=' + encodeURIComponent(q));
+                const dl = document.getElementById(input.getAttribute('list'));
+                if (!dl) return;
+                dl.innerHTML = '';
+                for (const it of items) {
+                    const o = document.createElement('option');
+                    o.value = it.value;
+                    dl.appendChild(o);
+                }
+            }, 200);
+            debounceMap.set(input, t);
+        }
+
+        function onConnectionChange(sel) { setHidden(picker(sel), sel.value); }
+
+        return { bootRow, onTypeChange, onContinentChange, onCountryChange,
+                 onRegionChange, onCityChange, onTypeaheadInput, onConnectionChange };
+    })();
 </script>
 
 <script src="{{ base_url_prefix }}/assets/textareaAutoResize.js?time={{ file_version }}"></script>

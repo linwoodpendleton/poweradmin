@@ -30,23 +30,18 @@ class GeoRoutingService
     private ?string $pdnsDb;
 
     /**
-     * High-level "line type" presets, DNSPod-style. Each entry maps to a
-     * resolver (line_value, low-level columns) and a localised label
-     * generator. The keys are the canonical values stored in
-     * geo_routing_rules.line_type.
+     * High-level "line type" presets, DNSPod-style but internationalised
+     * (no China-specific shortcuts; data-driven from the MaxMind tables).
+     * The keys are the canonical values stored in geo_routing_rules.line_type.
      */
     public const LINES = [
-        'default'    => ['needs_value' => false, 'label_en' => 'Default',         'label_zh' => '默认'],
-        'global'     => ['needs_value' => false, 'label_en' => 'Global',          'label_zh' => '全球'],
-        'telecom'    => ['needs_value' => false, 'label_en' => 'China Telecom',   'label_zh' => '电信'],
-        'unicom'     => ['needs_value' => false, 'label_en' => 'China Unicom',    'label_zh' => '联通'],
-        'mobile'     => ['needs_value' => false, 'label_en' => 'China Mobile',    'label_zh' => '移动'],
-        'other_isp'  => ['needs_value' => true,  'label_en' => 'Other ISP',       'label_zh' => '其他运营商'],
-        'region'     => ['needs_value' => true,  'label_en' => 'Continent',       'label_zh' => '大区'],
-        'country'    => ['needs_value' => true,  'label_en' => 'Country',         'label_zh' => '国家'],
-        'province'   => ['needs_value' => true,  'label_en' => 'CN Province',     'label_zh' => '境内 (省)'],
-        'connection' => ['needs_value' => true,  'label_en' => 'Connection Type', 'label_zh' => '接入方式'],
-        'custom'     => ['needs_value' => false, 'label_en' => 'Custom',          'label_zh' => '自定义'],
+        'default'    => ['label_en' => 'Default',         'label_zh' => '默认'],
+        'continent'  => ['label_en' => 'Continent',       'label_zh' => '大洲'],
+        'country'    => ['label_en' => 'Country',         'label_zh' => '国家'],
+        'isp'        => ['label_en' => 'ISP',             'label_zh' => '运营商'],
+        'domain'     => ['label_en' => 'Domain',          'label_zh' => '域名'],
+        'connection' => ['label_en' => 'Connection Type', 'label_zh' => '连接类型'],
+        'custom'     => ['label_en' => 'Custom',          'label_zh' => '自定义'],
     ];
 
     public function __construct(object $db, ?string $pdnsDb = null)
@@ -56,10 +51,19 @@ class GeoRoutingService
     }
 
     /**
-     * Translate a DNSPod-style (line_type, line_value) pair into the
-     * low-level match columns stored on geo_routing_rules. Returns an
-     * associative array keyed by the column names that callers can merge
-     * into their rule payload.
+     * Translate a (line_type, line_value) pair into the low-level match
+     * columns. line_value is a slash-separated payload whose contents depend
+     * on line_type:
+     *
+     *   default            line_value: (none)
+     *   continent          line_value: "AS"
+     *   country            line_value: "CN" | "CN/GD" | "CN/GD/<geoname_id>"
+     *                                  (country / country+region / country+region+city)
+     *   isp                line_value: "Cloudflare"        (substring match)
+     *   domain             line_value: "google.com"        (substring match)
+     *   connection         line_value: "Cable/DSL" | "Cellular" | ...
+     *   custom             line_value: free-form text label only (the rule
+     *                                  author wrote the low-level columns by hand)
      */
     public function lineToConditions(string $lineType, ?string $lineValue): array
     {
@@ -72,43 +76,76 @@ class GeoRoutingService
             'domain_pattern'  => null,
             'connection_type' => null,
         ];
+        $value = (string)$lineValue;
         switch ($lineType) {
             case 'default':
-            case 'global':
                 return $blank;
-            case 'telecom':
-                return ['isp_pattern' => 'china telecom'] + $blank;
-            case 'unicom':
-                return ['isp_pattern' => 'china unicom'] + $blank;
-            case 'mobile':
-                return ['isp_pattern' => 'china mobile'] + $blank;
-            case 'other_isp':
-                return ['isp_pattern' => strtolower(trim((string)$lineValue))] + $blank;
-            case 'region':
-                return ['continent_code' => strtoupper(trim((string)$lineValue))] + $blank;
-            case 'country':
-                return ['country_iso' => strtoupper(trim((string)$lineValue))] + $blank;
-            case 'province':
-                return [
-                    'country_iso' => 'CN',
-                    'region_code' => strtoupper(trim((string)$lineValue)),
-                ] + $blank;
+            case 'continent':
+                return ['continent_code' => strtoupper(trim($value))] + $blank;
+            case 'country': {
+                $parts = array_map('trim', explode('/', $value));
+                $out = $blank;
+                if (isset($parts[0]) && $parts[0] !== '') $out['country_iso'] = strtoupper($parts[0]);
+                if (isset($parts[1]) && $parts[1] !== '') $out['region_code'] = strtoupper($parts[1]);
+                if (isset($parts[2]) && ctype_digit($parts[2])) $out['city_geoname_id'] = (int)$parts[2];
+                return $out;
+            }
+            case 'isp':
+                return ['isp_pattern' => strtolower(trim($value))] + $blank;
+            case 'domain':
+                return ['domain_pattern' => strtolower(trim($value))] + $blank;
             case 'connection':
-                return ['connection_type' => trim((string)$lineValue)] + $blank;
+                return ['connection_type' => trim($value)] + $blank;
             case 'custom':
             default:
                 return $blank;
         }
     }
 
-    /** Human-readable label for a (line_type, line_value) pair. */
+    /**
+     * Human-readable label for a (line_type, line_value) pair. The country
+     * variant resolves the slash-separated parts into "Country / Region / City"
+     * via the reference tables when the database is available.
+     */
     public function lineLabel(string $lineType, ?string $lineValue, bool $preferZh = true): string
     {
         $meta = self::LINES[$lineType] ?? null;
-        if (!$meta) return $lineType;
-        $base = $preferZh ? $meta['label_zh'] : $meta['label_en'];
-        if (!$meta['needs_value'] || $lineValue === null || $lineValue === '') return $base;
-        return $base . ': ' . $lineValue;
+        $base = $meta
+            ? ($preferZh ? $meta['label_zh'] : $meta['label_en'])
+            : $lineType;
+        $value = (string)$lineValue;
+        if ($value === '') return $base;
+        if ($lineType === 'country') {
+            $parts = array_map('trim', explode('/', $value));
+            $labels = [];
+            if (isset($parts[0]) && $parts[0] !== '') {
+                $stmt = $this->db->prepare('SELECT name_en, name_zh FROM geo_countries WHERE iso_code=:iso');
+                $stmt->execute([':iso' => $parts[0]]);
+                $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: ['name_en' => $parts[0]];
+                $labels[] = $preferZh && !empty($row['name_zh']) ? $row['name_zh'] : $row['name_en'];
+            }
+            if (isset($parts[1]) && $parts[1] !== '') {
+                $stmt = $this->db->prepare('SELECT name_en, name_zh FROM geo_regions WHERE country_iso=:iso AND region_code=:rc');
+                $stmt->execute([':iso' => $parts[0], ':rc' => $parts[1]]);
+                $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: ['name_en' => $parts[1]];
+                $labels[] = $preferZh && !empty($row['name_zh']) ? $row['name_zh'] : $row['name_en'];
+            }
+            if (isset($parts[2]) && ctype_digit($parts[2])) {
+                $stmt = $this->db->prepare('SELECT name_en, name_zh FROM geo_cities WHERE geoname_id=:id');
+                $stmt->execute([':id' => (int)$parts[2]]);
+                $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: ['name_en' => $parts[2]];
+                $labels[] = $preferZh && !empty($row['name_zh']) ? $row['name_zh'] : $row['name_en'];
+            }
+            return $base . ': ' . implode(' / ', $labels);
+        }
+        if ($lineType === 'continent') {
+            $stmt = $this->db->prepare('SELECT name_en, name_zh FROM geo_continents WHERE code=:c');
+            $stmt->execute([':c' => strtoupper($value)]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: ['name_en' => $value];
+            $label = $preferZh && !empty($row['name_zh']) ? $row['name_zh'] : $row['name_en'];
+            return $base . ': ' . $label;
+        }
+        return $base . ': ' . $value;
     }
 
     /**

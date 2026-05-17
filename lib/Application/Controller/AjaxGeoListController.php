@@ -81,6 +81,23 @@ class AjaxGeoListController extends BaseController
                         ];
                     }
                     break;
+                case 'isps':
+                    $q = $_GET['q'] ?? '';
+                    foreach ($repo->searchIsps($q, 20) as $row) {
+                        $result[] = ['value' => $row['name'], 'label' => $row['name']];
+                    }
+                    break;
+                case 'domains':
+                    $q = $_GET['q'] ?? '';
+                    foreach ($repo->searchDomains($q, 20) as $row) {
+                        $result[] = ['value' => $row['name'], 'label' => $row['name']];
+                    }
+                    break;
+                case 'connection_types':
+                    foreach (['Cable/DSL', 'Cellular', 'Corporate', 'Satellite'] as $ct) {
+                        $result[] = ['value' => $ct, 'label' => $ct];
+                    }
+                    break;
                 default:
                     http_response_code(400);
                     echo json_encode(['error' => 'unknown kind']);
