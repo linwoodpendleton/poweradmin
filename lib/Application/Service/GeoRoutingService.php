@@ -221,22 +221,26 @@ class GeoRoutingService
 
     /**
      * Build a self-contained Lua body that PowerDNS evaluates per query.
-     * Pattern: for each rule (highest priority first) check geoiplookup()
-     * against the rule's match conditions; first match wins. If no rule
-     * matches, fall through to a default target (the wildcard rule, if any)
-     * or the literal string "0.0.0.0".
+     *
+     * PowerDNS LUA records prepend `return ` to the body, so we wrap the
+     * statements in an immediately-invoked function: `(function() ... end)()`.
+     * GeoIP results from `geoiplookup` come back lowercased, so the rule
+     * comparison values are lowercased here too. We use Lua `[[...]]`
+     * string literals throughout so the body can be embedded in the SQL
+     * `records.content` column ("A "<lua>"") without escaping inner double
+     * quotes.
      */
     private function renderLuaBody(string $recordType, array $rules): string
     {
         $lines = [];
-        $lines[] = 'local ip = bestwho:toString()';
-        $lines[] = 'local co = geoiplookup(ip, "Country") or ""';
-        $lines[] = 'local cn = geoiplookup(ip, "Continent") or ""';
-        $lines[] = 'local re = geoiplookup(ip, "Region") or ""';
-        $lines[] = 'local ci = geoiplookup(ip, "City") or ""';
-        $lines[] = 'local isp = geoiplookup(ip, "ISP") or ""';
-        $lines[] = 'local dm = geoiplookup(ip, "Domain") or ""';
-        $lines[] = 'local ct = geoiplookup(ip, "ConnectionType") or ""';
+        $lines[] = 'local ip=bestwho:toString()';
+        $lines[] = 'local co=geoiplookup(ip,GeoIPQueryAttribute.Country) or [[]]';
+        $lines[] = 'local cn=geoiplookup(ip,GeoIPQueryAttribute.Continent) or [[]]';
+        $lines[] = 'local re=geoiplookup(ip,GeoIPQueryAttribute.Region) or [[]]';
+        $lines[] = 'local ci=geoiplookup(ip,GeoIPQueryAttribute.City) or [[]]';
+        $lines[] = 'local isp=geoiplookup(ip,GeoIPQueryAttribute.ISP) or [[]]';
+        $lines[] = 'local dm=geoiplookup(ip,GeoIPQueryAttribute.Domain) or [[]]';
+        $lines[] = 'local ct=geoiplookup(ip,GeoIPQueryAttribute.ConnectionType) or [[]]';
 
         $default = null;
         foreach ($rules as $r) {
@@ -245,12 +249,12 @@ class GeoRoutingService
                 continue;
             }
             $conds = $this->buildLuaConditions($r);
-            $target = self::luaString((string)$r['target']);
+            $target = self::luaBracketString((string)$r['target']);
             $lines[] = 'if ' . implode(' and ', $conds) . ' then return ' . $target . ' end';
         }
-        $lines[] = 'return ' . self::luaString($default !== null ? (string)$default : '0.0.0.0');
+        $lines[] = 'return ' . self::luaBracketString($default !== null ? (string)$default : '0.0.0.0');
 
-        return implode('; ', $lines);
+        return '(function() ' . implode('; ', $lines) . ' end)()';
     }
 
     private function isWildcard(array $r): bool
@@ -265,32 +269,30 @@ class GeoRoutingService
     private function buildLuaConditions(array $r): array
     {
         $c = [];
+        // GeoIP attribute values are returned lowercased; compare in kind.
         if (!empty($r['continent_code'])) {
-            $c[] = 'cn == ' . self::luaString((string)$r['continent_code']);
+            $c[] = 'cn==' . self::luaBracketString(strtolower((string)$r['continent_code']));
         }
         if (!empty($r['country_iso'])) {
-            $c[] = 'co == ' . self::luaString((string)$r['country_iso']);
+            $c[] = 'co==' . self::luaBracketString(strtolower((string)$r['country_iso']));
         }
         if (!empty($r['region_code'])) {
-            $c[] = 're == ' . self::luaString((string)$r['region_code']);
+            $c[] = 're==' . self::luaBracketString(strtolower((string)$r['region_code']));
         }
         if (!empty($r['city_geoname_id'])) {
-            // City rules compare on the city's English name resolved from the
-            // database. We could carry the geoname id in lua, but it's not
-            // available from geoiplookup; matching by name is the practical option.
             $cityName = $this->getCityName((int)$r['city_geoname_id']);
             if ($cityName !== null) {
-                $c[] = 'string.lower(ci) == ' . self::luaString(strtolower($cityName));
+                $c[] = 'ci==' . self::luaBracketString(strtolower($cityName));
             }
         }
         if (!empty($r['isp_pattern'])) {
-            $c[] = 'string.find(string.lower(isp), ' . self::luaString(strtolower((string)$r['isp_pattern']), true) . ', 1, true) ~= nil';
+            $c[] = 'string.find(isp,' . self::luaBracketString(strtolower((string)$r['isp_pattern'])) . ',1,true)~=nil';
         }
         if (!empty($r['domain_pattern'])) {
-            $c[] = 'string.find(string.lower(dm), ' . self::luaString(strtolower((string)$r['domain_pattern']), true) . ', 1, true) ~= nil';
+            $c[] = 'string.find(dm,' . self::luaBracketString(strtolower((string)$r['domain_pattern'])) . ',1,true)~=nil';
         }
         if (!empty($r['connection_type'])) {
-            $c[] = 'ct == ' . self::luaString((string)$r['connection_type']);
+            $c[] = 'ct==' . self::luaBracketString(strtolower((string)$r['connection_type']));
         }
         return $c;
     }
@@ -308,20 +310,33 @@ class GeoRoutingService
         return $this->pdnsDb ? "`{$this->pdnsDb}`.`{$table}`" : "`{$table}`";
     }
 
-    /** Escape a Lua string literal. */
-    public static function luaString(string $s, bool $forFind = false): string
+    /**
+     * Render a Lua long-bracket string literal: `[[content]]`. Chosen so the
+     * Lua body can be embedded verbatim inside the SQL records.content column
+     * (`A "<lua>"`) without ever needing inner double-quote escaping. If the
+     * payload happens to contain `]]`, we widen to `[==[...]==]`.
+     */
+    public static function luaBracketString(string $s): string
     {
-        // The literal will be wrapped in double quotes; escape backslashes
-        // and double quotes. Newlines are converted to spaces.
-        $escaped = str_replace(
-            ["\\", "\"", "\n", "\r"],
-            ["\\\\", "\\\"", " ", " "],
-            $s
-        );
-        return '"' . $escaped . '"';
+        $level = 0;
+        while (strpos($s, '[' . str_repeat('=', $level) . '[') !== false
+            || strpos($s, ']' . str_repeat('=', $level) . ']') !== false) {
+            $level++;
+        }
+        $eq = str_repeat('=', $level);
+        // Newlines inside Lua long brackets are valid but ugly in a one-liner;
+        // normalise to spaces.
+        $s = str_replace(["\n", "\r"], ' ', $s);
+        return '[' . $eq . '[' . $s . ']' . $eq . ']';
     }
 
-    /** Wrap a Lua program for embedding in a PowerDNS LUA record's content. */
+    /**
+     * Wrap a Lua program body for embedding in a PowerDNS LUA record's
+     * `content` column. PowerDNS expects: <RTYPE> "<lua-code>". Inner double
+     * quotes inside the lua code must be escaped as \\". Because
+     * `luaBracketString` already eliminates inner double quotes, the escape
+     * step is a no-op in normal cases but kept for safety.
+     */
     public static function quoteLua(string $body): string
     {
         return '"' . str_replace(['\\', '"'], ['\\\\', '\\"'], $body) . '"';
