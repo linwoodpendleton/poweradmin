@@ -443,6 +443,54 @@ class EditController extends BaseController
             $displayRecords = $records;
         }
 
+        // ----- GeoIP line-aware records (DNSPod-style) -----
+        // The record list shows both plain PowerDNS records (line = default)
+        // and our line-aware geo rules as virtual rows annotated with a
+        // friendly line label. The auto-generated PowerDNS LUA dispatcher
+        // records that materialise each (name, type) bucket are hidden so
+        // end users never see the generated Lua code.
+        try {
+            $geoService = new \Poweradmin\Application\Service\GeoRoutingService(
+                $this->db,
+                $this->config->get('database', 'pdns_db_name')
+            );
+            $managed = $geoService->getManagedLuaKeys($zone_id);
+            if ($managed) {
+                $hide = [];
+                foreach ($managed as $k) { $hide[strtolower($k['name']) . '|LUA'] = true; }
+                $displayRecords = array_values(array_filter($displayRecords, function ($r) use ($hide) {
+                    $key = strtolower((string)($r['name'] ?? '')) . '|' . (string)($r['type'] ?? '');
+                    return !isset($hide[$key]);
+                }));
+            }
+            $geoLines = $geoService->listLinesForZone($zone_id);
+            // Tag each row with a 'line' label so the existing rows render with
+            // 默认 in the new column.
+            foreach ($displayRecords as &$row) {
+                if (!isset($row['line'])) $row['line'] = '默认';
+            }
+            unset($row);
+            // Convert each geo rule into a virtual record row.
+            foreach ($geoLines as $rule) {
+                $displayRecords[] = [
+                    'id'       => 'geo-' . (int)$rule['id'],
+                    'geo_rule_id' => (int)$rule['id'],
+                    'name'     => (string)$rule['record_name'],
+                    'name_to_display' => (string)$rule['record_name'],
+                    'type'     => (string)$rule['record_type'],
+                    'content'  => (string)$rule['target'],
+                    'ttl'      => 60,
+                    'prio'     => 0,
+                    'disabled' => $rule['enabled'] ? 0 : 1,
+                    'line'     => $rule['line_label'],
+                    'comment'  => (string)($rule['comment'] ?? ''),
+                ];
+            }
+        } catch (\Throwable $e) {
+            // The geo_routing_rules table may not exist on older installs;
+            // ignore and fall back to the plain record list.
+        }
+
         $this->render('edit.html', [
             'zone_id' => $zone_id,
             'zone_name' => $zone_name,

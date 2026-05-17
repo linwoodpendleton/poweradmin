@@ -51,7 +51,23 @@ CREATE TABLE IF NOT EXISTS `geo_routing_rules` (
   `domain_id`        INT NOT NULL,
   `record_name`      VARCHAR(255) NOT NULL,
   `record_type`      VARCHAR(10) NOT NULL DEFAULT 'A',
-  -- Match conditions (NULL = wildcard, all must match)
+  -- High-level "line" selection (DNSPod-style). Resolved at save time into
+  -- the low-level match conditions below by GeoRoutingService::saveFromLine.
+  --   default     : (no conditions, equivalent to a plain A record)
+  --   telecom     : isp_pattern='china telecom'
+  --   unicom      : isp_pattern='china unicom'
+  --   mobile      : isp_pattern='china mobile'
+  --   other_isp   : isp_pattern=<line_value>            (user types ISP name)
+  --   region      : continent_code=<line_value>         (AS / EU / NA / ...)
+  --   country     : country_iso=<line_value>            (e.g. JP / US)
+  --   province    : country_iso='CN' AND region_code=<line_value> (Chinese 省级)
+  --   global      : (no conditions; same as default for now)
+  --   connection  : connection_type=<line_value>        (Cable/DSL ...)
+  --   custom      : free-form combination of the low-level columns
+  `line_type`        VARCHAR(16) NOT NULL DEFAULT 'default',
+  `line_value`       VARCHAR(64) NULL,
+  -- Low-level match conditions (NULL = wildcard; all must match). For
+  -- line_type other than 'custom' these are derived from line_type/line_value.
   `continent_code`   CHAR(2) NULL,
   `country_iso`      CHAR(2) NULL,
   `region_code`      VARCHAR(8) NULL,
@@ -69,5 +85,6 @@ CREATE TABLE IF NOT EXISTS `geo_routing_rules` (
   `updated_at`       TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_lookup` (`record_name`, `record_type`, `enabled`, `priority`),
-  KEY `idx_domain` (`domain_id`)
+  KEY `idx_domain` (`domain_id`),
+  KEY `idx_line` (`line_type`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

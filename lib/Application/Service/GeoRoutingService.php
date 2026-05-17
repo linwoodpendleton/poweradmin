@@ -29,10 +29,202 @@ class GeoRoutingService
     private object $db;
     private ?string $pdnsDb;
 
+    /**
+     * High-level "line type" presets, DNSPod-style. Each entry maps to a
+     * resolver (line_value, low-level columns) and a localised label
+     * generator. The keys are the canonical values stored in
+     * geo_routing_rules.line_type.
+     */
+    public const LINES = [
+        'default'    => ['needs_value' => false, 'label_en' => 'Default',         'label_zh' => '默认'],
+        'global'     => ['needs_value' => false, 'label_en' => 'Global',          'label_zh' => '全球'],
+        'telecom'    => ['needs_value' => false, 'label_en' => 'China Telecom',   'label_zh' => '电信'],
+        'unicom'     => ['needs_value' => false, 'label_en' => 'China Unicom',    'label_zh' => '联通'],
+        'mobile'     => ['needs_value' => false, 'label_en' => 'China Mobile',    'label_zh' => '移动'],
+        'other_isp'  => ['needs_value' => true,  'label_en' => 'Other ISP',       'label_zh' => '其他运营商'],
+        'region'     => ['needs_value' => true,  'label_en' => 'Continent',       'label_zh' => '大区'],
+        'country'    => ['needs_value' => true,  'label_en' => 'Country',         'label_zh' => '国家'],
+        'province'   => ['needs_value' => true,  'label_en' => 'CN Province',     'label_zh' => '境内 (省)'],
+        'connection' => ['needs_value' => true,  'label_en' => 'Connection Type', 'label_zh' => '接入方式'],
+        'custom'     => ['needs_value' => false, 'label_en' => 'Custom',          'label_zh' => '自定义'],
+    ];
+
     public function __construct(object $db, ?string $pdnsDb = null)
     {
         $this->db = $db;
         $this->pdnsDb = $pdnsDb;
+    }
+
+    /**
+     * Translate a DNSPod-style (line_type, line_value) pair into the
+     * low-level match columns stored on geo_routing_rules. Returns an
+     * associative array keyed by the column names that callers can merge
+     * into their rule payload.
+     */
+    public function lineToConditions(string $lineType, ?string $lineValue): array
+    {
+        $blank = [
+            'continent_code'  => null,
+            'country_iso'     => null,
+            'region_code'     => null,
+            'city_geoname_id' => null,
+            'isp_pattern'     => null,
+            'domain_pattern'  => null,
+            'connection_type' => null,
+        ];
+        switch ($lineType) {
+            case 'default':
+            case 'global':
+                return $blank;
+            case 'telecom':
+                return ['isp_pattern' => 'china telecom'] + $blank;
+            case 'unicom':
+                return ['isp_pattern' => 'china unicom'] + $blank;
+            case 'mobile':
+                return ['isp_pattern' => 'china mobile'] + $blank;
+            case 'other_isp':
+                return ['isp_pattern' => strtolower(trim((string)$lineValue))] + $blank;
+            case 'region':
+                return ['continent_code' => strtoupper(trim((string)$lineValue))] + $blank;
+            case 'country':
+                return ['country_iso' => strtoupper(trim((string)$lineValue))] + $blank;
+            case 'province':
+                return [
+                    'country_iso' => 'CN',
+                    'region_code' => strtoupper(trim((string)$lineValue)),
+                ] + $blank;
+            case 'connection':
+                return ['connection_type' => trim((string)$lineValue)] + $blank;
+            case 'custom':
+            default:
+                return $blank;
+        }
+    }
+
+    /** Human-readable label for a (line_type, line_value) pair. */
+    public function lineLabel(string $lineType, ?string $lineValue, bool $preferZh = true): string
+    {
+        $meta = self::LINES[$lineType] ?? null;
+        if (!$meta) return $lineType;
+        $base = $preferZh ? $meta['label_zh'] : $meta['label_en'];
+        if (!$meta['needs_value'] || $lineValue === null || $lineValue === '') return $base;
+        return $base . ': ' . $lineValue;
+    }
+
+    /**
+     * Persist a DNSPod-style line-aware record. If line_type is 'default',
+     * writes a plain A/AAAA/CNAME row into PowerDNS's records table. For
+     * any other line_type the row goes to geo_routing_rules and the LUA
+     * dispatcher record is regenerated.
+     *
+     * Returns ['kind' => 'record'|'rule', 'id' => int].
+     */
+    public function saveFromLine(
+        int $domainId,
+        string $recordName,
+        string $recordType,
+        string $lineType,
+        ?string $lineValue,
+        string $target,
+        int $ttl = 60,
+        int $weight = 100,
+        int $priority = 100,
+        ?string $comment = null,
+        ?int $existingRuleId = null
+    ): array {
+        $recordType = strtoupper(trim($recordType));
+        $recordName = trim($recordName);
+        $target     = trim($target);
+
+        if ($lineType === 'default') {
+            // Default line → plain PowerDNS record. Drop any same-name same-type
+            // geo rules and the auto-generated LUA dispatcher.
+            $this->deleteRulesFor($domainId, $recordName, $recordType);
+            $recordsTable = $this->qualifyPdnsTable('records');
+            $del = $this->db->prepare(
+                "DELETE FROM {$recordsTable} WHERE domain_id=:did AND name=:name AND type=:type"
+            );
+            $del->execute([':did' => $domainId, ':name' => $recordName, ':type' => $recordType]);
+            $ins = $this->db->prepare(
+                "INSERT INTO {$recordsTable} (domain_id, name, type, content, ttl, prio, disabled)
+                 VALUES (:did, :name, :type, :content, :ttl, :prio, 0)"
+            );
+            $ins->execute([
+                ':did' => $domainId, ':name' => $recordName, ':type' => $recordType,
+                ':content' => $target, ':ttl' => $ttl, ':prio' => 0,
+            ]);
+            // No rules left → regenerateLua will remove any leftover LUA record.
+            $this->regenerateLua($domainId, $recordName, $recordType);
+            return ['kind' => 'record', 'id' => (int)$this->db->lastInsertId()];
+        }
+
+        // Non-default line → geo_routing_rules entry.
+        $conds = $this->lineToConditions($lineType, $lineValue);
+        $rule = array_merge($conds, [
+            'id'           => $existingRuleId,
+            'domain_id'    => $domainId,
+            'record_name'  => $recordName,
+            'record_type'  => $recordType,
+            'target'       => $target,
+            'weight'       => $weight,
+            'priority'     => $priority,
+            'enabled'      => 1,
+            'comment'      => $comment,
+            'line_type'    => $lineType,
+            'line_value'   => $lineValue,
+        ]);
+        $id = $this->saveRule($rule);
+        return ['kind' => 'rule', 'id' => $id];
+    }
+
+    private function deleteRulesFor(int $domainId, string $name, string $type): void
+    {
+        $del = $this->db->prepare(
+            "DELETE FROM geo_routing_rules WHERE domain_id=:did AND record_name=:name AND record_type=:type"
+        );
+        $del->execute([':did' => $domainId, ':name' => $name, ':type' => $type]);
+    }
+
+    /**
+     * Per-zone enumeration of all line-aware rules with friendly labels —
+     * used by the record list to render virtual rows DNSPod-style.
+     *
+     * @return array<int, array<string,mixed>>
+     */
+    public function listLinesForZone(int $domainId): array
+    {
+        $stmt = $this->db->prepare(
+            'SELECT * FROM geo_routing_rules WHERE domain_id=:did ORDER BY record_name, record_type, priority ASC, weight DESC'
+        );
+        $stmt->execute([':did' => $domainId]);
+        $rules = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($rules as &$r) {
+            $r['line_label'] = $this->lineLabel(
+                (string)($r['line_type'] ?? 'custom'),
+                $r['line_value'] ?? null
+            );
+        }
+        return $rules;
+    }
+
+    /**
+     * Names that the record list should hide from PowerDNS-side LUA records
+     * (because we generate one such LUA per (name, type) that has geo rules
+     * and the dispatcher should not be exposed to end users).
+     *
+     * @return array<int, array{name:string, type:string}>
+     */
+    public function getManagedLuaKeys(int $domainId): array
+    {
+        $stmt = $this->db->prepare(
+            'SELECT DISTINCT record_name, record_type FROM geo_routing_rules WHERE domain_id=:did'
+        );
+        $stmt->execute([':did' => $domainId]);
+        $out = [];
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $out[] = ['name' => (string)$r['record_name'], 'type' => (string)$r['record_type']];
+        }
+        return $out;
     }
 
     /** @return array<int, array<string,mixed>> */
@@ -61,6 +253,7 @@ class GeoRoutingService
         if (!empty($rule['id'])) {
             $sql = 'UPDATE geo_routing_rules SET
                 domain_id = :domain_id, record_name = :record_name, record_type = :record_type,
+                line_type = :line_type, line_value = :line_value,
                 continent_code = :continent_code, country_iso = :country_iso, region_code = :region_code,
                 city_geoname_id = :city_geoname_id, isp_pattern = :isp_pattern,
                 domain_pattern = :domain_pattern, connection_type = :connection_type,
@@ -73,11 +266,13 @@ class GeoRoutingService
             $id = (int)$rule['id'];
         } else {
             $sql = 'INSERT INTO geo_routing_rules
-                (domain_id, record_name, record_type, continent_code, country_iso, region_code,
+                (domain_id, record_name, record_type, line_type, line_value,
+                 continent_code, country_iso, region_code,
                  city_geoname_id, isp_pattern, domain_pattern, connection_type,
                  target, weight, priority, enabled, comment)
                 VALUES
-                (:domain_id, :record_name, :record_type, :continent_code, :country_iso, :region_code,
+                (:domain_id, :record_name, :record_type, :line_type, :line_value,
+                 :continent_code, :country_iso, :region_code,
                  :city_geoname_id, :isp_pattern, :domain_pattern, :connection_type,
                  :target, :weight, :priority, :enabled, :comment)';
             $stmt = $this->db->prepare($sql);
@@ -108,6 +303,8 @@ class GeoRoutingService
             'domain_id'       => (int)($r['domain_id'] ?? 0),
             'record_name'     => trim((string)($r['record_name'] ?? '')),
             'record_type'     => strtoupper(trim((string)($r['record_type'] ?? 'A'))),
+            'line_type'       => $this->nullIfEmpty($r['line_type'] ?? null) ?? 'custom',
+            'line_value'      => $this->nullIfEmpty($r['line_value'] ?? null),
             'continent_code'  => $this->nullIfEmpty($r['continent_code'] ?? null),
             'country_iso'     => $this->nullIfEmpty($r['country_iso'] ?? null),
             'region_code'     => $this->nullIfEmpty($r['region_code'] ?? null),
@@ -137,6 +334,8 @@ class GeoRoutingService
             ':domain_id'       => $r['domain_id'],
             ':record_name'     => $r['record_name'],
             ':record_type'     => $r['record_type'],
+            ':line_type'       => $r['line_type'] ?? 'custom',
+            ':line_value'      => $r['line_value'] ?? null,
             ':continent_code'  => $r['continent_code'],
             ':country_iso'     => $r['country_iso'],
             ':region_code'     => $r['region_code'],

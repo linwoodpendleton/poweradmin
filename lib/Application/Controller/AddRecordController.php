@@ -162,6 +162,9 @@ class AddRecordController extends BaseController
         $ttl = isset($_POST['ttl']) && $_POST['ttl'] !== '' ? (int)$_POST['ttl'] : $this->config->get('dns', 'ttl', 3600);
         $comment = $_POST['comment'] ?? '';
         $zone_id = (int)$this->getSafeRequestValue('zone_id');
+        $lineType = $_POST['line_type'] ?? 'default';
+        $lineValue = $_POST['line_value'] ?? null;
+        if (is_string($lineValue) && trim($lineValue) === '') $lineValue = null;
 
         // Convert IDN record name and content to punycode
         $name = DnsIdnService::toPunycode($name);
@@ -175,6 +178,25 @@ class AddRecordController extends BaseController
             return;
         }
         $name = DnsHelper::restoreZoneSuffix($name, $zone_name);
+
+        // GeoIP "line" routing: anything other than the default line goes
+        // through GeoRoutingService, which stores the rule in geo_routing_rules
+        // and regenerates the PowerDNS LUA dispatcher for the (name, type).
+        // Only valid for A / AAAA / CNAME (LUA records can return those types).
+        if ($lineType !== 'default' && $lineType !== '' && in_array($type, ['A', 'AAAA', 'CNAME'], true)) {
+            $geo = new \Poweradmin\Application\Service\GeoRoutingService(
+                $this->db,
+                $this->config->get('database', 'pdns_db_name')
+            );
+            try {
+                $geo->saveFromLine($zone_id, $name, $type, $lineType, $lineValue, $content, $ttl, 100, 100, $comment ?: null);
+                $this->setMessage('edit', 'success', _('Line-aware record successfully added.'));
+            } catch (\Throwable $e) {
+                $this->setMessage('edit', 'error', _('Failed to add line-aware record: ') . $e->getMessage());
+            }
+            $this->redirect('/zones/' . $zone_id . '/edit');
+            return;
+        }
 
         try {
             if (!$this->createRecord($zone_id, $name, $type, $content, $ttl, $prio, $comment)) {
@@ -455,6 +477,26 @@ class AddRecordController extends BaseController
             $prio = isset($record['prio']) && $record['prio'] !== '' ? (int)$record['prio'] : 0;
             $ttl = isset($record['ttl']) && $record['ttl'] !== '' ? (int)$record['ttl'] : $this->config->get('dns', 'ttl', 3600);
             $comment = $record['comment'] ?? '';
+            $lineType = $record['line_type'] ?? 'default';
+            $lineValue = $record['line_value'] ?? null;
+            if (is_string($lineValue) && trim($lineValue) === '') $lineValue = null;
+
+            // Line-aware path: delegate to GeoRoutingService for any non-default
+            // line on A/AAAA/CNAME so the rule lands in geo_routing_rules and
+            // a LUA dispatcher is regenerated for the (name, type) pair.
+            if ($lineType !== 'default' && $lineType !== '' && in_array($type, ['A', 'AAAA', 'CNAME'], true)) {
+                try {
+                    $geo = new \Poweradmin\Application\Service\GeoRoutingService(
+                        $this->db,
+                        $this->config->get('database', 'pdns_db_name')
+                    );
+                    $geo->saveFromLine($zone_id, $name, $type, $lineType, $lineValue, $content, $ttl, 100, 100, $comment ?: null);
+                    $successCount++;
+                } catch (\Throwable $e) {
+                    $failureCount++;
+                }
+                continue;
+            }
 
             if ($this->createRecord($zone_id, $name, $type, $content, $ttl, $prio, $comment)) {
                 $successCount++;

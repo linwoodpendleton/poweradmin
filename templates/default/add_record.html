@@ -62,6 +62,7 @@
                                 {% endif %}
                             </th>
                             <th>{% trans %}Type{% endtrans %}</th>
+                            <th title="{% trans %}DNSPod-style line type. Default = no GeoIP routing.{% endtrans %}">{% trans %}Line{% endtrans %}</th>
                             <th>{% trans %}Content{% endtrans %}</th>
                             <th>{% trans %}Priority{% endtrans %}</th>
                             <th>{% trans %}TTL{% endtrans %}</th>
@@ -94,6 +95,25 @@
                                     <option {{ add }} value="{{ record_type }}">{{ record_type }}{% if record_type in deprecated_types %} ({% trans %}deprecated{% endtrans %}){% endif %}</option>
                                     {% endfor %}
                                 </select>
+                            </td>
+                            <td style="min-width: 220px;">
+                                <select class="form-select form-select-sm line-type-select" name="records[0][line_type]"
+                                        onchange="updateLineValueUI(this)">
+                                    <option value="default" selected>默认 (Default)</option>
+                                    <option value="telecom">电信 (China Telecom)</option>
+                                    <option value="unicom">联通 (China Unicom)</option>
+                                    <option value="mobile">移动 (China Mobile)</option>
+                                    <option value="other_isp">其他运营商 (Other ISP)</option>
+                                    <option value="region">大区 (Continent)</option>
+                                    <option value="country">国家 (Country)</option>
+                                    <option value="province">境内 (CN Province)</option>
+                                    <option value="connection">接入类型 (Connection)</option>
+                                    <option value="global">全球 (Global)</option>
+                                </select>
+                                <div class="line-value-wrapper mt-1" style="display: none;">
+                                    <input type="text" class="form-control form-control-sm line-value-input"
+                                           name="records[0][line_value]" placeholder="">
+                                </div>
                             </td>
                             <td>
                                 <div class="content-container">
@@ -147,6 +167,17 @@
                                     {% endfor %}
                                 </select>
                             </td>
+                            <td style="min-width: 220px;">
+                                <select class="form-select form-select-sm line-type-select" name="records[{{ loop.index }}][line_type]" onchange="updateLineValueUI(this)">
+                                    {% set selectedLine = rec.line_type | default('default') %}
+                                    {% for opt in [{'v':'default','l':'默认 (Default)'},{'v':'telecom','l':'电信 (China Telecom)'},{'v':'unicom','l':'联通 (China Unicom)'},{'v':'mobile','l':'移动 (China Mobile)'},{'v':'other_isp','l':'其他运营商 (Other ISP)'},{'v':'region','l':'大区 (Continent)'},{'v':'country','l':'国家 (Country)'},{'v':'province','l':'境内 (CN Province)'},{'v':'connection','l':'接入类型 (Connection)'},{'v':'global','l':'全球 (Global)'}] %}
+                                    <option value="{{ opt.v }}" {% if opt.v == selectedLine %}selected{% endif %}>{{ opt.l }}</option>
+                                    {% endfor %}
+                                </select>
+                                <div class="line-value-wrapper mt-1" style="display: none;">
+                                    <input type="text" class="form-control form-control-sm line-value-input" name="records[{{ loop.index }}][line_value]" value="{{ rec.line_value | default('') }}" placeholder="">
+                                </div>
+                            </td>
                             <td>
                                 <div class="content-container">
                                     <input class="form-control form-control-sm record-content" type="text" name="records[{{ loop.index }}][content]" value="{{ rec.content | default('') }}" required>
@@ -191,7 +222,7 @@
                     </tbody>
                     <tfoot>
                         <tr class="table-light">
-                            <td colspan="{% if iface_record_comments %}9{% else %}8{% endif %}" class="text-end">
+                            <td colspan="{% if iface_record_comments %}10{% else %}9{% endif %}" class="text-end">
                                 <button type="button" class="btn btn-secondary btn-sm" onclick="addNewRecord()">
                                     <i class="bi bi-plus-circle me-1 text-white"></i>{% trans %}Add another record{% endtrans %}
                                 </button>
@@ -428,9 +459,35 @@
         document.querySelectorAll('.record-type-select').forEach(function(select) {
             updatePtrCheckboxVisibility(select);
         });
-        
+
         setupRecordWarningListeners();
+
+        // Initialise the line-value input visibility for any pre-rendered rows.
+        document.querySelectorAll('.line-type-select').forEach(updateLineValueUI);
     });
+
+    // Toggle the secondary line_value input based on the picked line type.
+    // Default/global/telecom/unicom/mobile need no value; the rest do (text or
+    // restricted set). Placeholder text gives a hint of the expected format.
+    function updateLineValueUI(select) {
+        const row = select.closest('tr');
+        if (!row) return;
+        const wrapper = row.querySelector('.line-value-wrapper');
+        const input   = row.querySelector('.line-value-input');
+        if (!wrapper || !input) return;
+
+        const HINTS = {
+            other_isp:  'e.g. amazon / google / cloudflare',
+            region:     'AS / EU / NA / SA / AF / OC',
+            country:    'ISO code, e.g. JP / US / DE',
+            province:   'CN region code, e.g. GD / BJ / SH',
+            connection: 'Cable/DSL | Cellular | Corporate | Satellite',
+        };
+        const needsValue = HINTS.hasOwnProperty(select.value);
+        wrapper.style.display = needsValue ? 'block' : 'none';
+        input.placeholder = HINTS[select.value] || '';
+        if (!needsValue) input.value = '';
+    }
 </script>
 
 <script src="{{ base_url_prefix }}/assets/textareaAutoResize.js?time={{ file_version }}"></script>
