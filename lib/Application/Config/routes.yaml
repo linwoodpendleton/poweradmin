@@ -841,6 +841,26 @@ dnssec_key_toggle:
     key_id: '\d+'
   methods: [GET, POST]
 
+# GeoIP routing (per-zone province / ISP / connection-type aware DNS rules)
+geo_routing:
+  path: /zones/{id}/geo
+  controller: Poweradmin\Application\Controller\GeoRoutingController::run
+  requirements:
+    id: '\d+'
+  methods: [GET, POST]
+
+geo_routing_edit:
+  path: /zones/{id}/geo/edit
+  controller: Poweradmin\Application\Controller\GeoRoutingEditController::run
+  requirements:
+    id: '\d+'
+  methods: [GET, POST]
+
+ajax_geo_list:
+  path: /ajax/geo-list
+  controller: Poweradmin\Application\Controller\AjaxGeoListController::run
+  methods: [GET]
+
 # Static Assets
 static_assets:
   path: /{path}
