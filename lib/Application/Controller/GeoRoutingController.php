@@ -16,7 +16,6 @@ use Poweradmin\BaseController;
 use Poweradmin\Domain\Model\Permission;
 use Poweradmin\Domain\Model\UserManager;
 use Poweradmin\Domain\Service\DnsRecord;
-use Valitron;
 
 /**
  * Lists all GeoIP routing rules for a zone. Allows toggling enabled,
@@ -28,17 +27,16 @@ class GeoRoutingController extends BaseController
 {
     public function run(): void
     {
-        $this->checkId();
-        $zoneId = (int)$_GET['id'];
+        $zoneId = $this->getZoneIdOrFail();
 
         $permEdit = Permission::getEditPermission($this->db);
-        $isOwner = UserManager::verify_user_is_owner_zoneid($this->db, $zoneId);
+        $isOwner = UserManager::verifyUserIsOwnerZoneId($this->db, $zoneId);
         $this->checkCondition(
             $permEdit === 'none' || (($permEdit === 'own' || $permEdit === 'own_as_client') && !$isOwner),
             _('You do not have permission to manage GeoIP routing for this zone.')
         );
 
-        $service = new GeoRoutingService($this->db, $this->config('pdns_db_name'));
+        $service = new GeoRoutingService($this->db, $this->getConfig()->get('database', 'pdns_db_name'));
 
         if ($this->isPost()) {
             $this->validateCsrfToken();
@@ -60,7 +58,7 @@ class GeoRoutingController extends BaseController
         }
 
         $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-        $zoneName = $dnsRecord->get_domain_name_by_id($zoneId);
+        $zoneName = $dnsRecord->getDomainNameById($zoneId) ?? '';
         $rules = $service->listRulesForDomain($zoneId);
 
         $this->render('geo_routing.html', [
@@ -70,12 +68,18 @@ class GeoRoutingController extends BaseController
         ]);
     }
 
-    private function checkId(): void
+    /**
+     * Pull the zone id from the request (SymfonyRouter merges path vars into
+     * the request array; legacy ?page=foo&id=X also lands there) and bail with
+     * a friendly error if it's missing or non-numeric.
+     */
+    private function getZoneIdOrFail(): int
     {
-        $v = new Valitron\Validator($_GET);
-        $v->rules(['required' => ['id'], 'integer' => ['id']]);
-        if (!$v->validate()) {
-            $this->showFirstError($v->errors());
+        $req = $this->getRequest();
+        $id = $req['id'] ?? $_GET['id'] ?? null;
+        if (!is_numeric($id) || (int)$id <= 0) {
+            $this->showError(_('Missing or invalid zone id.'));
         }
+        return (int)$id;
     }
 }

@@ -17,7 +17,6 @@ use Poweradmin\Domain\Model\Permission;
 use Poweradmin\Domain\Model\UserManager;
 use Poweradmin\Domain\Service\DnsRecord;
 use Poweradmin\Infrastructure\Repository\DbGeoRepository;
-use Valitron;
 
 /**
  * Add/edit a single GeoIP routing rule.
@@ -28,18 +27,22 @@ class GeoRoutingEditController extends BaseController
 {
     public function run(): void
     {
-        $this->checkId();
-        $zoneId = (int)$_GET['id'];
-        $ruleId = isset($_GET['rule_id']) ? (int)$_GET['rule_id'] : 0;
+        $req = $this->getRequest();
+        $zoneId = (int)($req['id'] ?? $_GET['id'] ?? 0);
+        $ruleId = (int)($req['rule_id'] ?? $_GET['rule_id'] ?? 0);
+        if ($zoneId <= 0) {
+            $this->showError(_('Missing or invalid zone id.'));
+            return;
+        }
 
         $permEdit = Permission::getEditPermission($this->db);
-        $isOwner = UserManager::verify_user_is_owner_zoneid($this->db, $zoneId);
+        $isOwner = UserManager::verifyUserIsOwnerZoneId($this->db, $zoneId);
         $this->checkCondition(
             $permEdit === 'none' || (($permEdit === 'own' || $permEdit === 'own_as_client') && !$isOwner),
             _('You do not have permission to manage GeoIP routing for this zone.')
         );
 
-        $service = new GeoRoutingService($this->db, $this->config('pdns_db_name'));
+        $service = new GeoRoutingService($this->db, $this->getConfig()->get('database', 'pdns_db_name'));
         $geo = new DbGeoRepository($this->db);
 
         if ($this->isPost()) {
@@ -48,14 +51,10 @@ class GeoRoutingEditController extends BaseController
             $rule['id'] = $ruleId > 0 ? $ruleId : null;
             $rule['domain_id'] = $zoneId;
 
-            $v = new Valitron\Validator($rule);
-            $v->rules([
-                'required' => ['record_name', 'record_type', 'target'],
-                'in' => [['record_type', ['A', 'AAAA', 'CNAME']]],
-                'lengthMax' => [['record_name', 255], ['target', 255]],
-            ]);
-            if (!$v->validate()) {
-                $this->showFirstError($v->errors());
+            $err = $this->validateRule($rule);
+            if ($err !== null) {
+                $this->showError($err);
+                return;
             }
 
             $id = $service->saveRule($rule);
@@ -72,7 +71,7 @@ class GeoRoutingEditController extends BaseController
         }
 
         $dnsRecord = new DnsRecord($this->db, $this->getConfig());
-        $zoneName = $dnsRecord->get_domain_name_by_id($zoneId);
+        $zoneName = $dnsRecord->getDomainNameById($zoneId) ?? '';
 
         // Preload continent + (if a country is already chosen) country/region/city
         $continents = $geo->getContinents();
@@ -116,12 +115,19 @@ class GeoRoutingEditController extends BaseController
         ];
     }
 
-    private function checkId(): void
+    private function validateRule(array $rule): ?string
     {
-        $v = new Valitron\Validator($_GET);
-        $v->rules(['required' => ['id'], 'integer' => ['id']]);
-        if (!$v->validate()) {
-            $this->showFirstError($v->errors());
+        foreach (['record_name', 'record_type', 'target'] as $f) {
+            if (empty($rule[$f])) {
+                return sprintf(_('Field "%s" is required.'), $f);
+            }
         }
+        if (!in_array($rule['record_type'], ['A', 'AAAA', 'CNAME'], true)) {
+            return _('record_type must be one of A / AAAA / CNAME.');
+        }
+        if (strlen((string)$rule['record_name']) > 255 || strlen((string)$rule['target']) > 255) {
+            return _('record_name and target must be 255 characters or fewer.');
+        }
+        return null;
     }
 }

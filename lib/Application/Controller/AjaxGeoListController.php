@@ -33,8 +33,11 @@ class AjaxGeoListController extends BaseController
     {
         header('Content-Type: application/json; charset=utf-8');
 
+        $req = $this->getRequest();
         $repo = new DbGeoRepository($this->db);
-        $kind = $_GET['kind'] ?? '';
+        // Symfony router merges request body into the request array; query
+        // params still land in $_GET. Read from both for safety.
+        $kind = $_GET['kind'] ?? $req['kind'] ?? '';
         $result = [];
 
         try {
@@ -48,8 +51,9 @@ class AjaxGeoListController extends BaseController
                     }
                     break;
                 case 'countries':
-                    $continent = $_GET['continent'] ?? null;
-                    foreach ($repo->getCountries($continent) as $row) {
+                    $continent = $_GET['continent'] ?? $req['continent'] ?? null;
+                    $rows = $repo->getCountries($continent);
+                    foreach ($rows as $row) {
                         $result[] = [
                             'value' => $row['iso_code'],
                             'label' => $this->pickLabel($row),
