@@ -51,6 +51,30 @@ function updateDatabase($db, $databaseCredentials): void
     if (method_exists($fill_perm_items, 'free')) {
         $fill_perm_items->free();
     }
+
+    // GeoIP routing schema — creates geo_continents/countries/regions/cities
+    // (reference tables for dropdowns) and geo_routing_rules (the rule store
+    // edited via the GeoIP Zone page). Tables are empty unless the operator
+    // imports sql/poweradmin-mysql-geoip-data.sql afterwards.
+    if (($databaseCredentials['db_type'] ?? '') === 'mysql') {
+        installGeoipRoutingSchema($db);
+    }
+}
+
+function installGeoipRoutingSchema($db): void
+{
+    $schemaPath = realpath(__DIR__ . '/../../sql/poweradmin-mysql-geoip-routing.sql');
+    if (!$schemaPath || !is_readable($schemaPath)) {
+        return;
+    }
+    $sql = file_get_contents($schemaPath);
+    // Naive splitter; the schema file contains only CREATE TABLE statements
+    // separated by ';'. Skip empty fragments and SQL comments.
+    foreach (explode(';', $sql) as $stmt) {
+        $stmt = trim($stmt);
+        if ($stmt === '' || str_starts_with($stmt, '--')) continue;
+        try { $db->exec($stmt); } catch (\Throwable $e) { /* table may already exist */ }
+    }
 }
 
 function createAdministratorUser($db, $pa_pass, $default_config_file): void

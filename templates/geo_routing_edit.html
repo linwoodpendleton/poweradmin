@@ -1,0 +1,218 @@
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="index.php">{% trans %}Home{% endtrans %}</a></li>
+        <li class="breadcrumb-item"><a href="index.php?page=list_zones">{% trans %}Zones{% endtrans %}</a></li>
+        <li class="breadcrumb-item"><a href="index.php?page=edit&id={{ zone_id }}">{{ zone_name }}</a></li>
+        <li class="breadcrumb-item"><a href="index.php?page=geo_routing&id={{ zone_id }}">{% trans %}GeoIP routing{% endtrans %}</a></li>
+        <li class="breadcrumb-item" aria-current="page">
+            {% if rule_id %}{% trans %}Edit rule{% endtrans %}{% else %}{% trans %}New rule{% endtrans %}{% endif %}
+        </li>
+    </ol>
+</nav>
+
+<h5 class="mb-3">
+    {% if rule_id %}{% trans %}Edit GeoIP routing rule{% endtrans %}
+    {% else %}{% trans %}New GeoIP routing rule{% endtrans %}{% endif %}
+    <small class="text-muted">— {{ zone_name }}</small>
+</h5>
+
+<form method="post">
+    <input type="hidden" name="_token" value="{{ csrf_token }}">
+
+    <div class="row mb-3">
+        <label class="col-sm-2 col-form-label">{% trans %}Record name{% endtrans %}</label>
+        <div class="col-sm-6">
+            <input class="form-control form-control-sm" name="record_name"
+                   value="{{ rule.record_name }}" required
+                   placeholder="www.{{ zone_name }}">
+            <div class="form-text">{% trans %}Full record name (FQDN), e.g.{% endtrans %} <code>www.{{ zone_name }}</code></div>
+        </div>
+        <label class="col-sm-1 col-form-label">{% trans %}Type{% endtrans %}</label>
+        <div class="col-sm-2">
+            <select class="form-select form-select-sm" name="record_type">
+                {% for t in ['A','AAAA','CNAME'] %}
+                <option value="{{ t }}" {% if rule.record_type == t %}selected{% endif %}>{{ t }}</option>
+                {% endfor %}
+            </select>
+        </div>
+    </div>
+
+    <fieldset class="border rounded p-3 mb-3">
+        <legend class="float-none w-auto px-2 fs-6">{% trans %}Match conditions{% endtrans %} <small class="text-muted">({% trans %}leave blank for any{% endtrans %})</small></legend>
+
+        <div class="row mb-2">
+            <label class="col-sm-2 col-form-label">{% trans %}Continent{% endtrans %}</label>
+            <div class="col-sm-3">
+                <select class="form-select form-select-sm" name="continent_code" id="continent_code">
+                    <option value="">— {% trans %}any{% endtrans %} —</option>
+                    {% for c in continents %}
+                    <option value="{{ c.code }}" {% if rule.continent_code == c.code %}selected{% endif %}>
+                        {% if c.name_zh %}{{ c.name_zh }} ({{ c.name_en }}){% else %}{{ c.name_en }}{% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <label class="col-sm-2 col-form-label">{% trans %}Country{% endtrans %}</label>
+            <div class="col-sm-3">
+                <select class="form-select form-select-sm" name="country_iso" id="country_iso">
+                    <option value="">— {% trans %}any{% endtrans %} —</option>
+                    {% for c in countries %}
+                    <option value="{{ c.iso_code }}" {% if rule.country_iso == c.iso_code %}selected{% endif %}>
+                        {% if c.name_zh %}{{ c.name_zh }} ({{ c.name_en }}){% else %}{{ c.name_en }}{% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
+
+        <div class="row mb-2">
+            <label class="col-sm-2 col-form-label">{% trans %}Province / Region{% endtrans %}</label>
+            <div class="col-sm-3">
+                <select class="form-select form-select-sm" name="region_code" id="region_code">
+                    <option value="">— {% trans %}any{% endtrans %} —</option>
+                    {% for r in regions %}
+                    <option value="{{ r.region_code }}" {% if rule.region_code == r.region_code %}selected{% endif %}>
+                        {% if r.name_zh %}{{ r.name_zh }} ({{ r.name_en }}){% else %}{{ r.name_en }}{% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <label class="col-sm-2 col-form-label">{% trans %}City{% endtrans %}</label>
+            <div class="col-sm-3">
+                <select class="form-select form-select-sm" name="city_geoname_id" id="city_geoname_id">
+                    <option value="">— {% trans %}any{% endtrans %} —</option>
+                    {% for c in cities %}
+                    <option value="{{ c.geoname_id }}" {% if rule.city_geoname_id == c.geoname_id %}selected{% endif %}>
+                        {% if c.name_zh %}{{ c.name_zh }} ({{ c.name_en }}){% else %}{{ c.name_en }}{% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
+
+        <div class="row mb-2">
+            <label class="col-sm-2 col-form-label">{% trans %}ISP contains{% endtrans %}</label>
+            <div class="col-sm-3">
+                <input class="form-control form-control-sm" name="isp_pattern"
+                       value="{{ rule.isp_pattern|default('') }}"
+                       placeholder="{% trans %}e.g. China Telecom{% endtrans %}">
+                <div class="form-text">{% trans %}Case-insensitive substring match.{% endtrans %}</div>
+            </div>
+            <label class="col-sm-2 col-form-label">{% trans %}Domain contains{% endtrans %}</label>
+            <div class="col-sm-3">
+                <input class="form-control form-control-sm" name="domain_pattern"
+                       value="{{ rule.domain_pattern|default('') }}"
+                       placeholder="{% trans %}e.g. baidu.com{% endtrans %}">
+            </div>
+        </div>
+
+        <div class="row mb-2">
+            <label class="col-sm-2 col-form-label">{% trans %}Connection type{% endtrans %}</label>
+            <div class="col-sm-3">
+                <select class="form-select form-select-sm" name="connection_type">
+                    <option value="">— {% trans %}any{% endtrans %} —</option>
+                    {% for ct in connection_types %}
+                    <option value="{{ ct }}" {% if rule.connection_type == ct %}selected{% endif %}>{{ ct }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
+    </fieldset>
+
+    <fieldset class="border rounded p-3 mb-3">
+        <legend class="float-none w-auto px-2 fs-6">{% trans %}Response{% endtrans %}</legend>
+
+        <div class="row mb-2">
+            <label class="col-sm-2 col-form-label">{% trans %}Target{% endtrans %}</label>
+            <div class="col-sm-6">
+                <input class="form-control form-control-sm" name="target"
+                       value="{{ rule.target }}" required
+                       placeholder="{% trans %}e.g. 1.2.3.4 or fallback.example.com{% endtrans %}">
+            </div>
+        </div>
+        <div class="row mb-2">
+            <label class="col-sm-2 col-form-label">{% trans %}Priority{% endtrans %}</label>
+            <div class="col-sm-2">
+                <input class="form-control form-control-sm" type="number" min="0" max="65535"
+                       name="priority" value="{{ rule.priority }}">
+                <div class="form-text">{% trans %}lower = checked first{% endtrans %}</div>
+            </div>
+            <label class="col-sm-2 col-form-label">{% trans %}Weight{% endtrans %}</label>
+            <div class="col-sm-2">
+                <input class="form-control form-control-sm" type="number" min="0" max="65535"
+                       name="weight" value="{{ rule.weight }}">
+            </div>
+        </div>
+        <div class="row mb-2">
+            <div class="col-sm-2"></div>
+            <div class="col-sm-6">
+                <label class="form-check-label">
+                    <input class="form-check-input" type="checkbox" name="enabled"
+                           value="1" {% if rule.enabled %}checked{% endif %}>
+                    {% trans %}Enabled{% endtrans %}
+                </label>
+            </div>
+        </div>
+        <div class="row mb-2">
+            <label class="col-sm-2 col-form-label">{% trans %}Comment{% endtrans %}</label>
+            <div class="col-sm-6">
+                <input class="form-control form-control-sm" name="comment"
+                       value="{{ rule.comment|default('') }}">
+            </div>
+        </div>
+    </fieldset>
+
+    <input class="btn btn-primary btn-sm" type="submit"
+           value="{% if rule_id %}{% trans %}Save changes{% endtrans %}{% else %}{% trans %}Create rule{% endtrans %}{% endif %}">
+    <a class="btn btn-secondary btn-sm"
+       href="index.php?page=geo_routing&id={{ zone_id }}">{% trans %}Cancel{% endtrans %}</a>
+</form>
+
+<script>
+// Cascading dropdowns: changing continent reloads countries, changing country
+// reloads regions, changing region reloads cities. Plain fetch() — no library.
+(function () {
+    const $ = id => document.getElementById(id);
+    const continent = $('continent_code');
+    const country   = $('country_iso');
+    const region    = $('region_code');
+    const city      = $('city_geoname_id');
+
+    function fill(sel, items, placeholder) {
+        sel.innerHTML = '<option value="">' + placeholder + '</option>';
+        for (const it of items) {
+            const o = document.createElement('option');
+            o.value = it.value;
+            o.textContent = it.label;
+            sel.appendChild(o);
+        }
+    }
+
+    async function loadJson(qs) {
+        try {
+            const r = await fetch('index.php?page=ajax_geo_list&' + qs);
+            if (!r.ok) return [];
+            return await r.json();
+        } catch (e) { return []; }
+    }
+
+    continent && continent.addEventListener('change', async () => {
+        const items = await loadJson('kind=countries&continent=' + encodeURIComponent(continent.value));
+        fill(country, items, '— any —');
+        fill(region, [], '— any —');
+        fill(city, [], '— any —');
+    });
+
+    country && country.addEventListener('change', async () => {
+        const items = await loadJson('kind=regions&country=' + encodeURIComponent(country.value));
+        fill(region, items, '— any —');
+        fill(city, [], '— any —');
+    });
+
+    region && region.addEventListener('change', async () => {
+        const items = await loadJson('kind=cities&country=' + encodeURIComponent(country.value)
+            + '&region=' + encodeURIComponent(region.value));
+        fill(city, items, '— any —');
+    });
+})();
+</script>

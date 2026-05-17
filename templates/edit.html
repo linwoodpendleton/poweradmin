@@ -162,6 +162,12 @@
 
 {% if perm_edit == "all" or (perm_edit == "own" or perm_edit == "own_as_client") and user_is_zone_owner == "1" %}
 {% if domain_type != "SLAVE" %}
+<p class="mb-3">
+    <a class="btn btn-outline-info btn-sm"
+       href="index.php?page=geo_routing&id={{ zone_id }}">
+        {% trans %}GeoIP routing rules{% endtrans %}
+    </a>
+</p>
 <form class="needs-validation" method="post" action="index.php?page=add_record&id={{ zone_id }}" novalidate>
     <input type="hidden" name="_token" value="{{ csrf_token }}">
     <input type="hidden" name="domain" value="{{ zone_id }}">
